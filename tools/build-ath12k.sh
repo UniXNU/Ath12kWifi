@@ -3,7 +3,7 @@
 cd "$(dirname "$0")/.."
 bash tools/check-ath12k.sh >/dev/null 2>&1
 A=$PWD/out/ath12k-src; O=out/ath12k-obj; rm -rf $O; mkdir -p $O
-for f in $A/*.c $A/wifi7/*.c; do b=$(basename $f .c); d=$(dirname $f | xargs basename); case $b in debugfs*|testmode|ahb|trace|acpi|coredump|wow) continue;; esac
+for f in $A/*.c $A/wifi7/*.c; do b=$(basename $f .c); d=$(dirname $f | xargs basename); case $b in debugfs*|testmode|ahb|trace|acpi|coredump|wow|debug) continue;; esac
   [ $d = wifi7 ] && b=w7_$b
-  clang -c -std=gnu11 -w -g0 -include lx_pci.h -I shim/include -I out/pinned -I $A -I $A/wifi7 $f -o $O/$b.o 2>&1 | grep error | head -3; done
+  clang -c -std=gnu11 -w -g0 -DCONFIG_ATH12K_DEBUG -include lx_pci.h -I shim/include -I out/pinned -I $A -I $A/wifi7 $f -o $O/$b.o 2>&1 | grep error | head -3; done
 ls $O | wc -l
