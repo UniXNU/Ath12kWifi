@@ -309,6 +309,11 @@ static void on_mgmt(struct sk_buff *skb) {
     if (C.state == NW_STA_UP) { teardown(1, reason); } else connect_done(NW_RES_REJECTED); }
   (void)fc; }
 void nw_sta_rx(struct sk_buff *skb) {
+  { struct ieee80211_rx_status *rs = IEEE80211_SKB_RXCB(skb);
+    if (rs->flag & RX_FLAG_8023) {   /* the hardware already made an Ethernet frame of it */
+      nw_wifi_stats.frames++;
+      if (skb->len >= 14 && !(skb->data[12] == 0x88 && skb->data[13] == 0x8e) && C.state >= NW_STA_KEYS && g_ev.rx) g_ev.rx(skb->data, skb->len);
+      return; } }
   if (skb->len < 24) return; nw_wifi_stats.frames++;
   struct ieee80211_hdr *h = (void *)skb->data;
   if (ieee80211_is_beacon(h->frame_control) || ieee80211_is_probe_resp(h->frame_control)) { nw_wifi_stats.beacons++; note_bss(skb); return; }
@@ -414,6 +419,7 @@ void nw_sta_ready(struct ieee80211_hw *hw) {
   g_vif->type = NL80211_IFTYPE_STATION; g_vif->bss_conf.vif = g_vif; g_vif->bss_conf.link_id = 0; g_vif->link_conf[0] = &g_vif->bss_conf;
   memcpy(g_vif->addr, hw->wiphy->perm_addr, 6); g_vif->addr_valid = true; g_vif->cab_queue = IEEE80211_INVAL_HW_QUEUE;
   for (int i = 0; i < IEEE80211_NUM_ACS; i++) g_vif->hw_queue[i] = IEEE80211_INVAL_HW_QUEUE;
+  g_vif->offload_flags = IEEE80211_OFFLOAD_ENCAP_ENABLED | IEEE80211_OFFLOAD_DECAP_ENABLED;   /* what the wireless stack gives a station of a driver that supports both */
   r = g_ops->add_interface(hw, g_vif); if (r) { lx_log(3, "wifi: add interface failed: %d", r); nw_wifi_stats.last_err = r; return; }
   nw_wifi_vif_add(g_vif); nw_wifi_stats.stage = 4; C.state = NW_STA_IDLE;
   INIT_DELAYED_WORK(&g_timer, timer_fn);
