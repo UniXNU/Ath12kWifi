@@ -39,13 +39,13 @@ static struct {
   int state, result; struct bss ap; u8 ssid[32]; u8 ssid_len;
   struct ieee80211_chanctx_conf *ctx; struct ieee80211_sta *sta; int sta_state; int chanctx_up;
   int secure; u8 pmk[32]; u8 ptk[48]; u8 anonce[32], snonce[32]; u64 replay; int have_replay; int ptk_ready; int hs_stage;
-  struct ieee80211_key_conf *ptk_key, *gtk_key; u64 tx_pn; u16 seq; u8 gtk_id;
+  struct ieee80211_key_conf *ptk_key, *gtk_key; u16 seq; u8 gtk_id;
   u64 started; u64 last_tx; int tries; int rsn_ok; u16 aid;
 } C;
 static struct delayed_work g_timer; static struct delayed_work g_scan_timer;
 static int g_scan_running; static int g_scan_directed; static u8 g_scan_ssid[32]; static u8 g_scan_ssid_len;
 
-static void tx_frame(struct sk_buff *skb, int use_key);
+static void tx_frame(struct sk_buff *skb);
 static void connect_done(int res);
 static void teardown(int notify_lost, int reason);
 
@@ -129,7 +129,7 @@ static void send_auth(void) {
   struct sk_buff *skb = new_frame(8); if (!skb) return;
   mgmt_header(skb, IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH);
   u8 *b = skb_put_zero(skb, 6); b[0] = 0; b[1] = 0; b[2] = 1; b[3] = 0; b[4] = 0; b[5] = 0;      /* open system, sequence 1, status 0 */
-  tx_frame(skb, 0); }
+  tx_frame(skb); }
 static int rates_2g[] = { 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c };
 static int rates_5g[] = { 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c };
 static void send_assoc(void) {
@@ -144,7 +144,7 @@ static void send_assoc(void) {
   if (C.secure) {   /* RSN: version 1, group CCMP, pairwise CCMP, key management PSK, no capabilities */
     static const u8 rsn[] = { WLAN_EID_RSN, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0 };
     skb_put_data(skb, rsn, sizeof rsn); }
-  tx_frame(skb, 0); }
+  tx_frame(skb); }
 
 /* ---- chanctx, interface and station entry, in the order a driver of this kind expects ---- */
 static struct ieee80211_channel *chan_for(u32 mhz) { return ieee80211_get_channel_khz(g_hw->wiphy, mhz * 1000); }
@@ -154,7 +154,7 @@ static int bring_up_channel(void) {
   ctx->def.chan = ch; ctx->def.width = NL80211_CHAN_WIDTH_20; ctx->def.center_freq1 = ch->center_freq; ctx->def.center_freq2 = 0;
   ctx->min_def = ctx->def; ctx->ap = ctx->def; ctx->rx_chains_static = 1; ctx->rx_chains_dynamic = 1;
   int r = g_ops->add_chanctx(g_hw, ctx); if (r) { lx_free(ctx); return r; }
-  C.ctx = ctx;
+  C.ctx = ctx; rcu_assign_pointer(g_vif->bss_conf.chanctx_conf, ctx); nw_wifi_chanctx_set(ctx);
   g_vif->bss_conf.bssid = C.ap.bssid; memcpy(g_vif->cfg.ap_addr, C.ap.bssid, 6);
   g_vif->bss_conf.chanreq.oper = ctx->def; g_vif->bss_conf.beacon_int = C.ap.interval ? C.ap.interval : 100; g_vif->bss_conf.dtim_period = 1;
   g_vif->cfg.ssid_len = C.ssid_len; memcpy(g_vif->cfg.ssid, C.ssid, C.ssid_len);
@@ -172,26 +172,26 @@ static int add_station(void) {
   sta->wme = true;
   enum nl80211_band band = C.ap.freq >= 5925 ? NL80211_BAND_6GHZ : C.ap.freq >= 4900 ? NL80211_BAND_5GHZ : NL80211_BAND_2GHZ;
   sta->deflink.supp_rates[band] = rate_mask(C.ap.ie, C.ap.ie_len, band);
-  C.sta = sta; int r = g_ops->sta_state(g_hw, g_vif, sta, IEEE80211_STA_NOTEXIST, IEEE80211_STA_NONE);
-  if (r) { lx_free(sta); C.sta = 0; return r; }
+  C.sta = sta; nw_wifi_sta_set(sta); int r = g_ops->sta_state(g_hw, g_vif, sta, IEEE80211_STA_NOTEXIST, IEEE80211_STA_NONE);
+  if (r) { nw_wifi_sta_set(0); lx_free(sta); C.sta = 0; return r; }
   C.sta_state = IEEE80211_STA_NONE; return 0; }
 static int set_sta_state(int to) {
   int r = g_ops->sta_state(g_hw, g_vif, C.sta, C.sta_state, to); if (r) lx_log(3, "wifi: station state %d -> %d failed: %d", C.sta_state, to, r); else C.sta_state = to; return r; }
 
 /* ---- tx ---- */
-static void tx_frame(struct sk_buff *skb, int use_key) {
+static void tx_frame(struct sk_buff *skb) {
   struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb); memset(info, 0, sizeof *info);
   info->control.vif = g_vif;
   struct ieee80211_hdr *h = (void *)skb->data;
-  if (use_key && C.ptk_key && ieee80211_is_data(h->frame_control)) {   /* the driver encrypts; the stack's part is the CCMP header and room for the check value */
-    info->control.hw_key = C.ptk_key; unsigned hl = ieee80211_hdrlen(h->frame_control);
-    u8 *iv = skb_push(skb, 8); memmove(skb->data, skb->data + 8, hl);   /* make room after the header */
-    h = (void *)skb->data; h->frame_control |= cpu_to_le16(IEEE80211_FCTL_PROTECTED);
-    u64 pn = ++C.tx_pn; u8 *ccmp = skb->data + hl; (void)iv;
-    ccmp[0] = pn; ccmp[1] = pn >> 8; ccmp[2] = 0; ccmp[3] = 0x20; ccmp[4] = pn >> 16; ccmp[5] = pn >> 24; ccmp[6] = pn >> 32; ccmp[7] = pn >> 40;
-    if (skb_tailroom(skb) >= 8) { /* reserved for the check value */ }
-  }
   struct ieee80211_tx_control ctl = { .sta = (C.sta && !is_multicast_ether_addr(h->addr1)) ? C.sta : 0 };
+  C.last_tx = lx_now_ms(); g_ops->tx(g_hw, &ctl, skb); }
+/* The interface hands Ethernet frames to the hardware, which makes the 802.11 frame and encrypts it with the installed key. */
+static void tx_eth(const u8 *e, unsigned len) {
+  struct sk_buff *skb = new_frame(len); if (!skb) return;
+  skb_put_data(skb, e, len); skb->protocol = cpu_to_be16(e[12] << 8 | e[13]);
+  struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb); memset(info, 0, sizeof *info);
+  info->control.vif = g_vif; info->flags = IEEE80211_TX_CTL_HW_80211_ENCAP; info->control.hw_key = C.ptk_key;
+  struct ieee80211_tx_control ctl = { .sta = is_multicast_ether_addr(e) ? 0 : C.sta };
   C.last_tx = lx_now_ms(); g_ops->tx(g_hw, &ctl, skb); }
 
 /* ---- the access point's frames ---- */
@@ -224,7 +224,8 @@ static void send_eapol(const struct eapol_key *k, unsigned total) {
   struct ieee80211_hdr *h = skb_put_zero(skb, 26); h->frame_control = cpu_to_le16(IEEE80211_FTYPE_DATA | IEEE80211_STYPE_QOS_DATA | IEEE80211_FCTL_TODS);
   memcpy(h->addr1, C.ap.bssid, 6); memcpy(h->addr2, g_vif->addr, 6); memcpy(h->addr3, C.ap.bssid, 6); h->seq_ctrl = cpu_to_le16(C.seq++ << 4);
   static const u8 snap[8] = { 0xaa, 0xaa, 3, 0, 0, 0, 0x88, 0x8e }; skb_put_data(skb, snap, 8); skb_put_data(skb, k, total);
-  tx_frame(skb, 0); }
+  skb->protocol = cpu_to_be16(ETH_P_PAE);   /* the driver sends the handshake as an 802.11 frame on an Ethernet interface */
+  tx_frame(skb); }
 static void sign(struct eapol_key *k, unsigned total) {
   u8 h[20]; memset(k->mic, 0, 16); nw_hmac_sha1(C.ptk, 16, (const u8 *)k, total, h); memcpy(k->mic, h, 16); }
 static int install_key(int pairwise, int idx, const u8 *key, int len) {
@@ -233,7 +234,7 @@ static int install_key(int pairwise, int idx, const u8 *key, int len) {
   kc->flags = pairwise ? IEEE80211_KEY_FLAG_PAIRWISE : 0; memcpy(kc->key, key, len);
   int r = g_ops->set_key(g_hw, SET_KEY, g_vif, pairwise ? C.sta : 0, kc);
   if (r) { lx_log(3, "wifi: installing the %s key failed: %d", pairwise ? "pairwise" : "group", r); lx_free(kc); return r; }
-  if (pairwise) { C.ptk_key = kc; C.tx_pn = 0; } else { C.gtk_key = kc; }
+  if (pairwise) { C.ptk_key = kc; } else { C.gtk_key = kc; }
   return 0; }
 static void finish_authorized(void) {
   if (set_sta_state(IEEE80211_STA_AUTHORIZED)) { connect_done(NW_RES_FAILED); return; }
@@ -337,8 +338,8 @@ static void teardown(int notify_lost, int reason) {
     if (C.gtk_key) { g_ops->set_key(g_hw, DISABLE_KEY, g_vif, 0, C.gtk_key); lx_free(C.gtk_key); C.gtk_key = 0; }
     if (g_vif->cfg.assoc) { g_vif->cfg.assoc = false; g_vif->cfg.aid = 0; g_ops->vif_cfg_changed(g_hw, g_vif, BSS_CHANGED_ASSOC); g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_ASSOC); }
     while (C.sta_state > IEEE80211_STA_NOTEXIST) { if (g_ops->sta_state(g_hw, g_vif, C.sta, C.sta_state, C.sta_state - 1)) break; C.sta_state--; }
-    lx_free(C.sta); C.sta = 0; }
-  if (C.ctx) { g_ops->unassign_vif_chanctx(g_hw, g_vif, &g_vif->bss_conf, C.ctx); g_ops->remove_chanctx(g_hw, C.ctx); lx_free(C.ctx); C.ctx = 0; }
+    nw_wifi_sta_set(0); lx_free(C.sta); C.sta = 0; }
+  if (C.ctx) { g_ops->unassign_vif_chanctx(g_hw, g_vif, &g_vif->bss_conf, C.ctx); g_ops->remove_chanctx(g_hw, C.ctx); RCU_INIT_POINTER(g_vif->bss_conf.chanctx_conf, NULL); nw_wifi_chanctx_set(0); lx_free(C.ctx); C.ctx = 0; }
   g_vif->bss_conf.bssid = g_no_bssid; C.ptk_ready = 0; C.hs_stage = 0; C.have_replay = 0; C.chanctx_up = 0;
   if (notify_lost) { C.state = NW_STA_IDLE; if (g_ev.link_lost) g_ev.link_lost(reason); } }
 static void timer_fn(struct work_struct *w) {
@@ -367,8 +368,8 @@ static void start_connect(void) {
     else nw_pbkdf2_sha1(g_req.pass, g_req.pass_len, C.ssid, C.ssid_len, 4096, C.pmk, 32);
   } else if (rsn) { lx_log(4, "wifi: network needs a passphrase"); connect_done(NW_RES_BAD_KEY); return; }
   int r = bring_up_channel(); if (r) { lx_log(3, "wifi: channel setup failed: %d", r); connect_done(NW_RES_FAILED); return; }
-  r = add_station(); if (r) { lx_log(3, "wifi: station setup failed: %d", r); connect_done(NW_RES_FAILED); return; }
   r = g_ops->assign_vif_chanctx(g_hw, g_vif, &g_vif->bss_conf, C.ctx); if (r) { lx_log(3, "wifi: channel assign failed: %d", r); connect_done(NW_RES_FAILED); return; }
+  r = add_station(); if (r) { lx_log(3, "wifi: station setup failed: %d", r); connect_done(NW_RES_FAILED); return; }
   g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_BSSID);
   C.state = NW_STA_AUTH; C.tries = 0; C.started = lx_now_ms(); nw_wifi_stats.stage = 7;
   lx_log(6, "wifi: connecting to %02x:%02x:%02x:%02x:%02x:%02x on %u MHz", C.ap.bssid[0], C.ap.bssid[1], C.ap.bssid[2], C.ap.bssid[3], C.ap.bssid[4], C.ap.bssid[5], C.ap.freq);
@@ -379,14 +380,7 @@ static void send_queued(void) {
   for (;;) {
     lock(); struct txq_item *it = g_txq_head; if (it) { g_txq_head = it->next; if (!g_txq_head) g_txq_tail = 0; g_txq_n--; } unlock();
     if (!it) return;
-    if (C.state == NW_STA_UP && it->len >= 14) {
-      const u8 *e = it->data; struct sk_buff *skb = new_frame(it->len + 64);
-      if (skb) { struct ieee80211_hdr *h = skb_put_zero(skb, 26);
-        h->frame_control = cpu_to_le16(IEEE80211_FTYPE_DATA | IEEE80211_STYPE_QOS_DATA | IEEE80211_FCTL_TODS);
-        memcpy(h->addr1, C.ap.bssid, 6); memcpy(h->addr2, e + 6, 6); memcpy(h->addr3, e, 6); h->seq_ctrl = cpu_to_le16(C.seq++ << 4);
-        u8 *qos = (u8 *)h + 24; qos[0] = 0; qos[1] = 0;
-        u8 snap[8] = { 0xaa, 0xaa, 3, 0, 0, 0, e[12], e[13] }; skb_put_data(skb, snap, 8); skb_put_data(skb, e + 14, it->len - 14);
-        tx_frame(skb, 1); } }
+    if (C.state == NW_STA_UP && it->len >= 14) tx_eth(it->data, it->len);
     lx_free(it); } }
 int nw_wifi_tx(const uint8_t *eth, size_t len) {
   if (len < 14 || len > 2000) return -1; if (g_txq_n >= 128) return -2;

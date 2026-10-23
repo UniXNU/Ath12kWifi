@@ -12,4 +12,7 @@ struct ieee80211_hw *nw_wifi_hw(void);
 const struct ieee80211_ops *nw_wifi_ops(void);
 void nw_wifi_vif_add(struct ieee80211_vif *v);
 void nw_wifi_vif_del(struct ieee80211_vif *v);
+struct ieee80211_sta; struct ieee80211_chanctx_conf;
+void nw_wifi_sta_set(struct ieee80211_sta *s);
+void nw_wifi_chanctx_set(struct ieee80211_chanctx_conf *c);
 #endif

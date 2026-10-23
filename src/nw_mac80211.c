@@ -138,17 +138,20 @@ void ieee80211_beacon_free_ema_list(struct ieee80211_ema_beacons *b) { (void)b; 
 struct sk_buff *ieee80211_get_fils_discovery_tmpl(struct ieee80211_hw *hw, struct ieee80211_vif *v) { (void)hw; (void)v; return 0; }
 struct sk_buff *ieee80211_get_unsol_bcast_probe_resp_tmpl(struct ieee80211_hw *hw, struct ieee80211_vif *v) { (void)hw; (void)v; return 0; }
 
-/* interface and station iteration: the station code registers what exists */
+/* interface, station and channel iteration: the station code registers what exists */
 static struct ieee80211_vif *g_vif[4]; static int g_nvif;
 void nw_wifi_vif_add(struct ieee80211_vif *v) { if (g_nvif < 4) g_vif[g_nvif++] = v; }
 void nw_wifi_vif_del(struct ieee80211_vif *v) { for (int i = 0; i < g_nvif; i++) if (g_vif[i] == v) { g_vif[i] = g_vif[--g_nvif]; return; } }
 void ieee80211_iterate_active_interfaces_atomic(struct ieee80211_hw *hw, u32 fl, void (*it)(void *, u8 *, struct ieee80211_vif *), void *data) {
   (void)hw; (void)fl; for (int i = 0; i < g_nvif; i++) it(data, g_vif[i]->addr, g_vif[i]); }
-void ieee80211_iterate_stations_atomic(struct ieee80211_hw *hw, void (*it)(void *, struct ieee80211_sta *), void *data) { (void)hw; (void)it; (void)data; }
-void ieee80211_iter_chan_contexts_atomic(struct ieee80211_hw *hw, void (*it)(struct ieee80211_hw *, struct ieee80211_chanctx_conf *, void *), void *data) { (void)hw; (void)it; (void)data; }
-struct ieee80211_sta *ieee80211_find_sta(struct ieee80211_vif *v, const u8 *addr) { (void)v; (void)addr; return 0; }
+static struct ieee80211_sta *g_sta; static struct ieee80211_chanctx_conf *g_ctx;
+void nw_wifi_sta_set(struct ieee80211_sta *s) { g_sta = s; }
+void nw_wifi_chanctx_set(struct ieee80211_chanctx_conf *c) { g_ctx = c; }
+void ieee80211_iterate_stations_atomic(struct ieee80211_hw *hw, void (*it)(void *, struct ieee80211_sta *), void *data) { (void)hw; if (g_sta) it(data, g_sta); }
+void ieee80211_iter_chan_contexts_atomic(struct ieee80211_hw *hw, void (*it)(struct ieee80211_hw *, struct ieee80211_chanctx_conf *, void *), void *data) { if (g_ctx) it(hw, g_ctx, data); }
+struct ieee80211_sta *ieee80211_find_sta(struct ieee80211_vif *v, const u8 *addr) { (void)v; return g_sta && ether_addr_equal(g_sta->addr, addr) ? g_sta : 0; }
 
 /* No stored networks yet: the station code keeps its own list. */
 struct cfg80211_bss *__cfg80211_get_bss(struct wiphy *w, struct ieee80211_channel *c, const u8 *bssid, const u8 *ssid, size_t ssid_len, enum ieee80211_bss_type t, enum ieee80211_privacy p, u32 use_for) {
   (void)w; (void)c; (void)bssid; (void)ssid; (void)ssid_len; (void)t; (void)p; (void)use_for; return 0; }
-struct ieee80211_sta *__ieee80211_iterate_stations(struct ieee80211_hw *hw, struct ieee80211_sta *prev) { (void)hw; (void)prev; return 0; }
+struct ieee80211_sta *__ieee80211_iterate_stations(struct ieee80211_hw *hw, struct ieee80211_sta *prev) { (void)hw; return prev ? 0 : g_sta; }
