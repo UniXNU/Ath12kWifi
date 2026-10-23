@@ -34,15 +34,20 @@ grep -q 'wait_event_timeout_once' $O/wmi.c || { echo "wmi.c patch missed" >&2; e
 rm -f $O/wifi7/hw.c; sed 's/^\t\t\.rfkill_pin = 48,/\t\t.rfkill_pin = 0,/' $A/wifi7/hw.c > $O/wifi7/hw.c
 grep -q 'rfkill_pin = 48' $O/wifi7/hw.c && { echo "wifi7/hw.c patch missed" >&2; exit 1; }
 # The WCN7850 firmware takes its MLO peer count from the MLO fields of the host capability message and fails an allocation in WMI_INIT
-# when they are missing; the firmware does not always flag single chip MLO in its PHY capability reply. The copy of qmi.c treats a
-# successful PHY capability reply as single chip MLO support, so the host capability message always carries those fields.
+# when they are missing, so the copy of qmi.c always sends them. That is only about the message: whether this board does MLO stays what
+# the firmware's PHY capability reply says (it says no here), so the host keeps a wiphy per radio and creates scan interfaces without
+# links.
 python3 - "$A/qmi.c" "$O/qmi.c" <<'PY'
 import os, sys
 src, dst = sys.argv[1], sys.argv[2]
 s = open(src).read()
-old = '\tif (resp.single_chip_mlo_support_valid && resp.single_chip_mlo_support)\n\t\tab->single_chip_mlo_support = true;\n'
+old = ('\tif (!ag->mlo_capable) {\n'
+       '\t\tath12k_dbg(ab, ATH12K_DBG_QMI,\n'
+       '\t\t\t   "MLO is disabled hence skip QMI MLO cap");\n'
+       '\t\treturn 0;\n'
+       '\t}\n\n')
 assert s.count(old) == 1, "qmi.c mlo mark"
-s = s.replace(old, '\tab->single_chip_mlo_support = true;\n', 1)
+s = s.replace(old, '', 1)
 # The PHY capability reply can say the firmware takes host memory on demand (TLV 0x17); the host capability message then says the host
 # offers it (TLV 0x33). Without that answer the firmware leaves its host memory segment unused.
 def elem(tlv, struct, field, flag):
@@ -53,7 +58,9 @@ for mark, tlv, struct, field in (('\t\t\t\t\t   feature_list),\n\t},\n', '0x33',
                                  ('\t\t\t\t\t   single_chip_mlo_support),\n\t},\n', '0x17', 'struct qmi_wlanfw_phy_cap_resp_msg_v01', 'nw_on_demand_ddr')):
     assert s.count(mark) == 1, "qmi.c element mark " + tlv
     s = s.replace(mark, mark + elem(tlv, struct, field, True) + elem(tlv, struct, field, False), 1)
-old = '\tab->single_chip_mlo_support = true;\n'
+old = ('\tif (resp.single_chip_mlo_support_valid && resp.single_chip_mlo_support)\n'
+       '\t\tab->single_chip_mlo_support = true;\n')
+assert s.count(old) == 1, "qmi.c phy cap mark"
 s = s.replace(old, old + '\tnw_on_demand_ddr = resp.nw_on_demand_ddr_valid && resp.nw_on_demand_ddr;\n'
               '\tath12k_dbg(ab, ATH12K_DBG_QMI, "phy capability: host memory on demand %u\\n", nw_on_demand_ddr);\n', 1)
 old = '\tret = ath12k_host_cap_parse_mlo(ab, &req);\n'
