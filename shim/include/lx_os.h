@@ -7,15 +7,17 @@ typedef unsigned long ulong;
 
 struct device; struct firmware; struct sk_buff; struct module; struct kobj_uevent_env; struct attribute_group;
 struct kobject { int unused; };
+struct device_node;
 struct attribute { const char *name; };
 struct device_attribute { struct attribute attr; };
 struct bus_type;
-struct device_driver { const char *name; const struct bus_type *bus; struct module *owner; int (*probe)(struct device *); };
+struct device_driver { const char *name; const struct bus_type *bus; struct module *owner; int (*probe)(struct device *); const struct dev_pm_ops *pm; };
+struct dev_pm_ops;
 struct device_type { const char *name; void (*release)(struct device *); };
 struct device {
   const char *name; char namebuf[64]; struct device *parent; void *drvdata; u64 dma_mask; void *platform_data;
   struct device_driver *driver; const struct bus_type *bus; const struct device_type *type; void (*release)(struct device *);
-  struct kobject kobj; struct list_head children, sibling; int registered;
+  struct kobject kobj; struct list_head children, sibling; int registered; struct device_node *of_node;
 };
 struct bus_type {
   const char *name; const char *dev_name; int (*match)(struct device *, const struct device_driver *); int (*probe)(struct device *);
@@ -216,7 +218,6 @@ void ida_free(struct ida *i, unsigned int id);
 #define ida_simple_remove(i, id) ida_free(i, id)
 
 
-struct sk_buff { u8 *data; u32 len; u32 truesize; u8 *head; u32 buflen; };
 
 
 

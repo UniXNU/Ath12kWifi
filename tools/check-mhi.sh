@@ -8,5 +8,5 @@ cp shim/mhi/trace.h $O/trace.h
 mkdir -p $O/../common; ln -sf $L/drivers/bus/mhi/common.h $O/../common.h
 for f in init main pm boot; do
   echo "== $f"
-  clang -fsyntax-only -std=gnu11 -Wall -Wno-unused-function -Wno-unused-variable -Wno-pointer-sign -I shim/include -I $O -idirafter $L/include $O/$f.c 2>&1 | grep -E "error|fatal" | head -${N:-12}
+  clang -fsyntax-only -std=gnu11 -Wall -Wno-unused-function -Wno-unused-variable -Wno-pointer-sign -I shim/include -I $O -I out/pinned $O/$f.c 2>&1 | grep -E "error|fatal" | head -${N:-12}
 done
