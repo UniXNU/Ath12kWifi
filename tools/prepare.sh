@@ -33,6 +33,19 @@ grep -q 'wait_event_timeout_once' $O/wmi.c || { echo "wmi.c patch missed" >&2; e
 # This board has no radio switch on the chip's pin 48: the WCN7850 entry of the copy of wifi7/hw.c names no rfkill pin, so no switch is configured.
 rm -f $O/wifi7/hw.c; sed 's/^\t\t\.rfkill_pin = 48,/\t\t.rfkill_pin = 0,/' $A/wifi7/hw.c > $O/wifi7/hw.c
 grep -q 'rfkill_pin = 48' $O/wifi7/hw.c && { echo "wifi7/hw.c patch missed" >&2; exit 1; }
+# The WCN7850 firmware takes its MLO peer count from the MLO fields of the host capability message and fails an allocation in WMI_INIT
+# when they are missing; the firmware does not always flag single chip MLO in its PHY capability reply. The copy of qmi.c treats a
+# successful PHY capability reply as single chip MLO support, so the host capability message always carries those fields.
+python3 - "$A/qmi.c" "$O/qmi.c" <<'PY'
+import os, sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+old = '\tif (resp.single_chip_mlo_support_valid && resp.single_chip_mlo_support)\n\t\tab->single_chip_mlo_support = true;\n'
+assert s.count(old) == 1, "qmi.c mlo mark"
+s = s.replace(old, '\tab->single_chip_mlo_support = true;\n', 1)
+if os.path.lexists(dst): os.remove(dst)
+open(dst, 'w').write(s)
+PY
 # The copy also shows the bytes of an event it does not know.
 python3 - "$O/wmi.c" <<'PY'
 import sys
