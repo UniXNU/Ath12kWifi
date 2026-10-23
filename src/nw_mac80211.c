@@ -143,3 +143,8 @@ void ieee80211_iterate_active_interfaces_atomic(struct ieee80211_hw *hw, u32 fl,
 void ieee80211_iterate_stations_atomic(struct ieee80211_hw *hw, void (*it)(void *, struct ieee80211_sta *), void *data) { (void)hw; (void)it; (void)data; }
 void ieee80211_iter_chan_contexts_atomic(struct ieee80211_hw *hw, void (*it)(struct ieee80211_hw *, struct ieee80211_chanctx_conf *, void *), void *data) { (void)hw; (void)it; (void)data; }
 struct ieee80211_sta *ieee80211_find_sta(struct ieee80211_vif *v, const u8 *addr) { (void)v; (void)addr; return 0; }
+
+/* No stored networks yet: the station code keeps its own list. */
+struct cfg80211_bss *__cfg80211_get_bss(struct wiphy *w, struct ieee80211_channel *c, const u8 *bssid, const u8 *ssid, size_t ssid_len, enum ieee80211_bss_type t, enum ieee80211_privacy p, u32 use_for) {
+  (void)w; (void)c; (void)bssid; (void)ssid; (void)ssid_len; (void)t; (void)p; (void)use_for; return 0; }
+struct ieee80211_sta *__ieee80211_iterate_stations(struct ieee80211_hw *hw, struct ieee80211_sta *prev) { (void)hw; (void)prev; return 0; }

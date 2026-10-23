@@ -8,7 +8,7 @@ typedef u32 __u32;
 #define PF_QIPCRTR 42
 #define SOCK_DGRAM 2
 #define MSG_DONTWAIT 0x40
-#define EAFNOSUPPORT_LX 97
+
 struct sockaddr { __kernel_sa_family_t sa_family; char sa_data[14]; };
 struct kvec { void *iov_base; size_t iov_len; };
 struct msghdr { void *msg_name; int msg_namelen; unsigned int msg_flags; };

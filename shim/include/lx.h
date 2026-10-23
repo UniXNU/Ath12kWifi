@@ -15,6 +15,7 @@ typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t
 typedef int8_t s8; typedef int16_t s16; typedef int32_t s32; typedef int64_t s64;
 typedef u16 __le16; typedef u32 __le32; typedef u64 __le64; typedef u16 __be16; typedef u32 __be32;
 typedef u64 dma_addr_t; typedef u64 phys_addr_t; typedef long ssize_t_lx;
+typedef long ssize_t;
 typedef unsigned int gfp_t; typedef long long loff_t;
 #define __bitwise
 #define __iomem
