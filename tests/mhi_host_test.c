@@ -96,7 +96,7 @@ static dma_addr_t p_dma_map(void *p, size_t n, int d) { (void)n; (void)d; return
 static void p_dma_sync(dma_addr_t b, size_t n, int d) { (void)b; (void)n; (void)d; }
 static int p_fw(const char *n, const u8 **d, size_t *s) { (void)n; *d = g_fw; *s = g_fwsz; return 0; }
 static const struct lx_platform plat = { p_now, p_sleep, dev_poll, p_log, p_halt, p_alloc, p_free, p_dma_alloc, p_dma_free, p_dma_map, p_dma_sync, p_fw };
-const struct lx_platform *lx_plat = &plat;
+
 int mhi_init_module_for_test(void);
 extern int mhi_init_hook(void);
 
@@ -106,6 +106,7 @@ int main(void) {
   *R(0x100 + BHI_EXECENV) = 0;  /* PBL */
   lx_root_init();
   mhi_init_hook();
+  lx_plat = &plat;
   static struct nw_mhi n;
   int r = nw_mhi_register(&n, g_bar, sizeof g_bar, 0, 0xffffffffull, fw, g_fwsz);
   printf("register: %d\n", r); if (r) return 1;

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include "lx_plat.h"
 
+const struct lx_platform *lx_plat;
 static struct list_head g_work = LIST_HEAD_INIT(g_work);
 static struct list_head g_timers = LIST_HEAD_INIT(g_timers);   /* delayed_work entries ordered by insertion */
 static struct { int used; unsigned int irq; irq_handler_t h, t; void *id; int pending; } g_irq[64];

@@ -33,7 +33,7 @@ int pci_alloc_irq_vectors(struct pci_dev *d, unsigned int min, unsigned int max,
   u32 lo, hi, data;
   if (nw_board->msi_target(&lo, &hi, &data)) return -ENOSPC;
   for (unsigned int i = 0; i < n; i++) { g_msi[i].msg.address_lo = lo; g_msi[i].msg.address_hi = hi; g_msi[i].msg.data = data + i; g_msi[i].pci.msi_attrib.is_64 = 1; }
-  d->nvec = n; d->msi_enabled = 1; return n; }
+  d->nvec = n; d->msi_enabled = 1; d->irq = nw_board->irq_base; return n; }
 void pci_free_irq_vectors(struct pci_dev *d) { d->nvec = 0; d->msi_enabled = 0; }
 int pci_irq_vector(struct pci_dev *d, unsigned int nr) { (void)d; return nw_board->irq_base + nr; }
 struct msi_desc *irq_get_msi_desc(unsigned int irq) { unsigned int i = irq - nw_board->irq_base; return i < 32 ? &g_msi[i] : 0; }
