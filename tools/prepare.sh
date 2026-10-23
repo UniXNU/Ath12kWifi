@@ -43,6 +43,38 @@ s = open(src).read()
 old = '\tif (resp.single_chip_mlo_support_valid && resp.single_chip_mlo_support)\n\t\tab->single_chip_mlo_support = true;\n'
 assert s.count(old) == 1, "qmi.c mlo mark"
 s = s.replace(old, '\tab->single_chip_mlo_support = true;\n', 1)
+# The PHY capability reply can say the firmware takes host memory on demand (TLV 0x17); the host capability message then says the host
+# offers it (TLV 0x33). Without that answer the firmware leaves its host memory segment unused.
+def elem(tlv, struct, field, flag):
+    return ('\t{\n\t\t.data_type\t= %s,\n\t\t.elem_len\t= 1,\n\t\t.elem_size\t= sizeof(u8),\n\t\t.array_type\t= NO_ARRAY,\n'
+            '\t\t.tlv_type\t= %s,\n\t\t.offset\t\t= offsetof(%s, %s),\n\t},\n'
+            % ('QMI_OPT_FLAG' if flag else 'QMI_UNSIGNED_1_BYTE', tlv, struct, field + ('_valid' if flag else '')))
+for mark, tlv, struct, field in (('\t\t\t\t\t   feature_list),\n\t},\n', '0x33', 'struct qmi_wlanfw_host_cap_req_msg_v01', 'nw_on_demand_mem'),
+                                 ('\t\t\t\t\t   single_chip_mlo_support),\n\t},\n', '0x17', 'struct qmi_wlanfw_phy_cap_resp_msg_v01', 'nw_on_demand_ddr')):
+    assert s.count(mark) == 1, "qmi.c element mark " + tlv
+    s = s.replace(mark, mark + elem(tlv, struct, field, True) + elem(tlv, struct, field, False), 1)
+old = '\tab->single_chip_mlo_support = true;\n'
+s = s.replace(old, old + '\tnw_on_demand_ddr = resp.nw_on_demand_ddr_valid && resp.nw_on_demand_ddr;\n'
+              '\tath12k_dbg(ab, ATH12K_DBG_QMI, "phy capability: host memory on demand %u\\n", nw_on_demand_ddr);\n', 1)
+old = '\tret = ath12k_host_cap_parse_mlo(ab, &req);\n'
+assert s.count(old) == 1, "qmi.c host cap mark"
+s = s.replace(old, '\tif (nw_on_demand_ddr) {\n\t\treq.nw_on_demand_mem_valid = 1;\n\t\treq.nw_on_demand_mem = 1;\n\t}\n\n' + old, 1)
+old = '#include "qmi.h"\n'
+assert s.count(old) == 1, "qmi.c include mark"
+s = s.replace(old, old + '\n/* the firmware said it takes host memory on demand */\nstatic u8 nw_on_demand_ddr;\n', 1)
+if os.path.lexists(dst): os.remove(dst)
+open(dst, 'w').write(s)
+PY
+python3 - "$A/qmi.h" "$O/qmi.h" <<'PY'
+import os, sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+for old, new in (('\tu64 feature_list;\n\n};', '\tu64 feature_list;\n\tu8 nw_on_demand_mem_valid;\n\tu8 nw_on_demand_mem;\n};'),
+                 ('\tu8 single_chip_mlo_support;\n};', '\tu8 single_chip_mlo_support;\n\tu8 nw_on_demand_ddr_valid;\n\tu8 nw_on_demand_ddr;\n};'),
+                 ('QMI_WLANFW_HOST_CAP_REQ_MSG_V01_MAX_LEN\t\t261', 'QMI_WLANFW_HOST_CAP_REQ_MSG_V01_MAX_LEN\t\t265'),
+                 ('QMI_WLANFW_PHY_CAP_RESP_MSG_V01_MAX_LEN\t\t18', 'QMI_WLANFW_PHY_CAP_RESP_MSG_V01_MAX_LEN\t\t22')):
+    assert s.count(old) == 1, "qmi.h mark " + old[:30]
+    s = s.replace(old, new, 1)
 if os.path.lexists(dst): os.remove(dst)
 open(dst, 'w').write(s)
 PY
