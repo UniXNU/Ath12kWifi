@@ -77,11 +77,18 @@ typedef u64 __be64;
 #define BUILD_BUG_ON(c) _Static_assert(!(c), "build bug")
 #define READ_ONCE(x) (*(volatile __typeof__(x) *)&(x))
 #define WRITE_ONCE(x, v) (*(volatile __typeof__(x) *)&(x) = (v))
-#define smp_wmb() __atomic_thread_fence(__ATOMIC_RELEASE)
-#define smp_rmb() __atomic_thread_fence(__ATOMIC_ACQUIRE)
+#define smp_wmb() wmb()
+#define smp_rmb() rmb()
+/* The endpoint and the device mappings are outside the inner-shareable domain the C11 fences order: full system barriers. */
+#if defined(__aarch64__)
+#define mb() __asm__ volatile("dsb sy" ::: "memory")
+#define wmb() __asm__ volatile("dsb sy" ::: "memory")
+#define rmb() __asm__ volatile("dsb ld" ::: "memory")
+#else
 #define mb() __atomic_thread_fence(__ATOMIC_SEQ_CST)
 #define wmb() __atomic_thread_fence(__ATOMIC_SEQ_CST)
 #define rmb() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#endif
 #define barrier() __asm__ volatile("" ::: "memory")
 #define fallthrough __attribute__((fallthrough))
 #define BITS_TO_LONGS(n) DIV_ROUND_UP(n, 64)
@@ -253,8 +260,9 @@ char *lx_strdup(const char *s);
 #define PAGE_SIZE 4096UL
 
 /* io: BAR registers are volatile 32-bit words */
-static inline u32 readl(const volatile void *a) { u32 v = *(const volatile u32 *)a; return v; }
-static inline void writel(u32 v, volatile void *a) { *(volatile u32 *)a = v; }
+/* like the real accessors: a write is ordered after the memory writes before it, a read before the reads after it */
+static inline u32 readl(const volatile void *a) { u32 v = *(const volatile u32 *)a; rmb(); return v; }
+static inline void writel(u32 v, volatile void *a) { wmb(); *(volatile u32 *)a = v; }
 #define readl_relaxed readl
 #define writel_relaxed writel
 #define iowrite32 writel
