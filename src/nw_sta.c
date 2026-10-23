@@ -24,6 +24,7 @@ static void unlock(void) { __atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE); }
 struct bss { u8 bssid[6]; u8 ssid_len; u8 ssid[32]; u32 freq; s8 signal; u16 caps, interval; u64 seen; u16 ie_len; u8 ie[IE_MAX]; };
 static struct bss g_bss[MAX_BSS]; static int g_nbss;
 
+static u8 g_no_bssid[6];   /* the driver compares received frames with the interface's access point address, so it is never a null pointer */
 static struct ieee80211_hw *g_hw; static const struct ieee80211_ops *g_ops; static struct ieee80211_vif *g_vif;
 static struct nw_wifi_events g_ev;
 
@@ -338,7 +339,7 @@ static void teardown(int notify_lost, int reason) {
     while (C.sta_state > IEEE80211_STA_NOTEXIST) { if (g_ops->sta_state(g_hw, g_vif, C.sta, C.sta_state, C.sta_state - 1)) break; C.sta_state--; }
     lx_free(C.sta); C.sta = 0; }
   if (C.ctx) { g_ops->unassign_vif_chanctx(g_hw, g_vif, &g_vif->bss_conf, C.ctx); g_ops->remove_chanctx(g_hw, C.ctx); lx_free(C.ctx); C.ctx = 0; }
-  g_vif->bss_conf.bssid = 0; C.ptk_ready = 0; C.hs_stage = 0; C.have_replay = 0; C.chanctx_up = 0;
+  g_vif->bss_conf.bssid = g_no_bssid; C.ptk_ready = 0; C.hs_stage = 0; C.have_replay = 0; C.chanctx_up = 0;
   if (notify_lost) { C.state = NW_STA_IDLE; if (g_ev.link_lost) g_ev.link_lost(reason); } }
 static void timer_fn(struct work_struct *w) {
   (void)w; u64 now = lx_now_ms();
@@ -417,7 +418,7 @@ void nw_sta_ready(struct ieee80211_hw *hw) {
   r = g_ops->start(hw); if (r) { lx_log(3, "wifi: start failed: %d", r); nw_wifi_stats.last_err = r; return; }
   g_vif = lx_alloc(sizeof *g_vif + hw->vif_data_size + 64, 1); if (!g_vif) return;
   g_vif->type = NL80211_IFTYPE_STATION; g_vif->bss_conf.vif = g_vif; g_vif->bss_conf.link_id = 0; g_vif->link_conf[0] = &g_vif->bss_conf;
-  memcpy(g_vif->addr, hw->wiphy->perm_addr, 6); g_vif->addr_valid = true; memcpy(g_vif->bss_conf.addr, hw->wiphy->perm_addr, 6);   /* a link's own address: the driver makes its vdev with it */ g_vif->cab_queue = IEEE80211_INVAL_HW_QUEUE;
+  memcpy(g_vif->addr, hw->wiphy->perm_addr, 6); g_vif->addr_valid = true; memcpy(g_vif->bss_conf.addr, hw->wiphy->perm_addr, 6); g_vif->bss_conf.bssid = g_no_bssid;   /* a link's own address: the driver makes its vdev with it */ g_vif->cab_queue = IEEE80211_INVAL_HW_QUEUE;
   for (int i = 0; i < IEEE80211_NUM_ACS; i++) g_vif->hw_queue[i] = IEEE80211_INVAL_HW_QUEUE;
   g_vif->offload_flags = IEEE80211_OFFLOAD_ENCAP_ENABLED | IEEE80211_OFFLOAD_DECAP_ENABLED;   /* what the wireless stack gives a station of a driver that supports both */
   r = g_ops->add_interface(hw, g_vif); if (r) { lx_log(3, "wifi: add interface failed: %d", r); nw_wifi_stats.last_err = r; return; }
