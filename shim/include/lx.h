@@ -262,7 +262,8 @@ char *lx_strdup(const char *s);
 /* io: BAR registers are volatile 32-bit words */
 /* like the real accessors: a write is ordered after the memory writes before it, a read before the reads after it */
 static inline u32 readl(const volatile void *a) { u32 v = *(const volatile u32 *)a; rmb(); return v; }
-static inline void writel(u32 v, volatile void *a) { wmb(); *(volatile u32 *)a = v; }
+extern void (*lx_mmio_trace)(volatile void *a, u32 v);
+static inline void writel(u32 v, volatile void *a) { wmb(); if (lx_mmio_trace) lx_mmio_trace(a, v); *(volatile u32 *)a = v; }
 #define readl_relaxed readl
 #define writel_relaxed writel
 #define iowrite32 writel
