@@ -8,6 +8,7 @@
 #include "nw_qrtr.h"
 #include "nw_mac80211.h"
 #include "nw_wifi.h"
+#include "nw_board.h"
 
 int ath12k_wifi7_pci_init(void);
 void ath12k_wifi7_pci_exit(void);

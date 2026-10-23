@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 set -e
 bash tools/check-mhi.sh >/dev/null 2>&1 || true
 L=$PWD/deps/linux; O=out/mhi-src
-CF="-std=gnu11 -g -w -I shim/include -I src -I $O -I out/pinned"
+CF="-std=gnu11 -g -w -I shim/include -I include -I src -I $O -I out/pinned"
 mkdir -p out/t
 for f in init main pm boot; do clang $CF -c $O/$f.c -o out/t/$f.o; done
 clang $CF -c shim/src/lx_rt.c -o out/t/rt.o; clang $CF -c shim/src/mhi_hook.c -o out/t/hook.o
