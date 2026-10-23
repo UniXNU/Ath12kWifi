@@ -6,7 +6,7 @@
 
 static void emit(int level, const char *fmt, va_list ap) {
   char b[300]; vsnprintf(b, sizeof b, fmt, ap); size_t n = strlen(b); if (n && b[n - 1] == '\n') b[n - 1] = 0;
-  lx_plat->log(level, b); }
+  lx_plat->log(level, b); if (lx_log_tap) lx_log_tap(level, b); }
 void ath12k_info(struct ath12k_base *ab, const char *fmt, ...) { (void)ab; va_list ap; va_start(ap, fmt); emit(6, fmt, ap); va_end(ap); }
 void ath12k_err(struct ath12k_base *ab, const char *fmt, ...) { (void)ab; va_list ap; va_start(ap, fmt); emit(3, fmt, ap); va_end(ap); }
 void __ath12k_warn(struct device *dev, const char *fmt, ...) { (void)dev; va_list ap; va_start(ap, fmt); emit(4, fmt, ap); va_end(ap); }
