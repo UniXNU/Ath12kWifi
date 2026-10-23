@@ -5,10 +5,11 @@
 /* ---- packet buffers: one allocation holds the shared info, the head room, the data and the tail room ---- */
 struct sk_buff *alloc_skb(unsigned int size, gfp_t f) {
   (void)f; struct sk_buff *s = lx_alloc(sizeof *s, 1); if (!s) return 0;
-  size = ALIGN(size, 4); u8 *b = lx_alloc(size + sizeof(struct skb_shared_info) + 64, 1); if (!b) { lx_free(s); return 0; }
+  /* packet data lives in the DMA window: the device reads and writes it */
+  size = ALIGN(size, 4); u64 bus; u8 *b = lx_plat->dma_alloc(size + sizeof(struct skb_shared_info) + 64, &bus); if (!b) { lx_free(s); return 0; }
   s->head = s->data = s->tail = b; s->end = b + size; s->truesize = size; return s; }
 struct sk_buff *__dev_alloc_skb(unsigned int size, gfp_t f) { struct sk_buff *s = alloc_skb(size + 32, f); if (s) skb_reserve(s, 32); return s; }
-void kfree_skb(struct sk_buff *s) { if (!s) return; if (!s->cloned) lx_free(s->head); lx_free(s); }
+void kfree_skb(struct sk_buff *s) { if (!s) return; lx_plat->dma_free(0, s->head, 0); lx_free(s); }
 struct sk_buff *skb_copy(const struct sk_buff *s, gfp_t f) {
   struct sk_buff *n = alloc_skb(s->end - s->head, f); if (!n) return 0;
   skb_reserve(n, s->data - s->head); skb_put_data(n, s->data, s->len); memcpy(n->cb, s->cb, sizeof n->cb);
