@@ -95,6 +95,11 @@ old = '\t\t\tar->mac_addr[4] += ar->pdev_idx;\n\t\t}\n'
 assert s.count(old) == 1, "mac.c address mark"
 s = s.replace(old, old + '\t\tif (!is_valid_ether_addr(ar->mac_addr)) {\n\t\t\tnw_board_mac(ar->mac_addr);\n\t\t\tar->mac_addr[4] += ar->pdev_idx;\n\t\t}\n', 1)
 s = s.replace('#include "mac.h"\n', '#include "mac.h"\nvoid nw_board_mac(u8 *a);\n', 1)
+# A station without links has no scan link to speak of: the copy scans on the interface's own link (0) so the scan vdev is made the way the
+# interface's ordinary vdev is.
+old = '\tscan_links_map = ~ahvif->links_map & ATH12K_SCAN_LINKS_MASK;\n'
+assert s.count(old) == 1, "mac.c scan link mark"
+s = s.replace(old, '\tif (!ahvif->links_map)\n\t\treturn 0;\n' + old, 1)
 assert 'void nw_board_mac' in s, "mac.c include mark"
 if os.path.lexists(dst): os.remove(dst)
 open(dst, 'w').write(s)
