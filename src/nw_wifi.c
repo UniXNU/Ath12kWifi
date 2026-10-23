@@ -51,35 +51,29 @@ static void ring_state(struct ath12k_base *ab, int p) {
            s->u.dst_ring.hp_addr ? *s->u.dst_ring.hp_addr : 0xffffffffu);
   }
 }
-/* The firmware pages its code and data in from the bulk image the host keeps (and writes changed data pages back to it): the image's segments are
- * logged with the pages that no longer equal the firmware file, so a page the host has overwritten shows. */
-static void image_check(struct mhi_controller *mc) {
-  struct image_info *img = mc->fbc_image; const u8 *fw; size_t n;
-  if (!img) { lx_log(3, "stuck: no bulk image"); return; }
-  if (lx_plat->fw_get("amss.bin", &fw, &n)) { lx_log(3, "stuck: firmware file not readable"); return; }
-  u64 next = img->mhi_buf[0].dma_addr; int gaps = 0;
-  for (u32 i = 0; i < img->entries; i++) {
-    struct mhi_buf *b = &img->mhi_buf[i];
-    if (b->dma_addr != next || i + 1 == img->entries) lx_log(3, "stuck: image seg %u at %llx len %zx", i, (unsigned long long)b->dma_addr, b->len);
-    if (b->dma_addr != next) gaps++;
-    next = b->dma_addr + b->len;
-  }
-  size_t off = 0; int bad = 0, shown = 0;
-  for (u32 i = 0; i + 1 < img->entries && off < n; i++) {
-    const u8 *p = img->mhi_buf[i].buf; size_t len = img->mhi_buf[i].len;
-    for (size_t pg = 0; pg < len && off + pg < n; pg += 4096) {
-      size_t m = len - pg < 4096 ? len - pg : 4096; if (off + pg + m > n) m = n - off - pg;
-      if (!memcmp(p + pg, fw + off + pg, m)) continue;
+/* The firmware copies its image into the host memory segment of type 1 it asked for over QMI and pages from there (host address = segment +
+ * offset in the firmware file). Its read-only pages (code and constants, file offsets below the first writable data) must still equal the file. */
+static void ddr_check(struct ath12k_base *ab) {
+  const u8 *fw; size_t n;
+  if (lx_plat->fw_get("amss.bin", &fw, &n)) return;
+  for (int i = 0; i < ab->qmi.mem_seg_count; i++) {
+    struct target_mem_chunk *c = &ab->qmi.target_mem[i];
+    lx_log(3, "stuck: qmi segment %d type %u at %llx size %x", i, c->type, (unsigned long long)c->paddr, c->size);
+    if (c->type != 1 || !c->v.addr) continue;
+    const u8 *p = c->v.addr; size_t end = n < c->size ? n : c->size; if (end > 0x3b3000) end = 0x3b3000;
+    int bad = 0, shown = 0;
+    for (size_t off = 0xe9000; off < end; off += 4096) {
+      size_t m = end - off < 4096 ? end - off : 4096;
+      if (!memcmp(p + off, fw + off, m)) continue;
       bad++;
-      if (shown < 24) {
-        size_t k = 0; while (k < m && p[pg + k] == fw[off + pg + k]) k++;
-        u32 now, was; memcpy(&now, p + pg + (k & ~3u), 4); memcpy(&was, fw + off + pg + (k & ~3u), 4);
-        lx_log(3, "stuck: image page %zx differs from %zx: %08x, file %08x", off + pg, off + pg + k, now, was); shown++;
+      if (shown < 16) {
+        size_t k = 0; while (k < m && p[off + k] == fw[off + k]) k++; k &= ~(size_t)15;
+        const u32 *q = (const u32 *)(p + off + k);
+        lx_log(3, "stuck: ddr page %zx differs at %zx: %08x %08x %08x %08x", off, off + k, q[0], q[1], q[2], q[3]); shown++;
       }
     }
-    off += len;
+    lx_log(3, "stuck: ddr segment: %d read-only pages of %zu differ from the file", bad, (end - 0xe9000) / 4096);
   }
-  lx_log(3, "stuck: image %u segments, %d gaps, %d of %zu pages differ from the file", img->entries, gaps, bad, (n + 4095) / 4096);
 }
 static void wmi_stuck(void) {
   if (g_wmi_stuck != 1 || !g_hw) return;
@@ -88,7 +82,7 @@ static void wmi_stuck(void) {
   for (int p = 1; p <= 4; p++) ring_state(ab, p);
   lx_log(3, "stuck: wmi credits %d, mhi ee %d state %d", ab->htc.endpoint[ATH12K_HTC_EP_2].tx_credits, ath12k_pci_priv(ab)->mhi_ctrl->ee,
          ath12k_pci_priv(ab)->mhi_ctrl->dev_state);
-  image_check(ath12k_pci_priv(ab)->mhi_ctrl);
+  ddr_check(ab);
   lx_log(3, "stuck: asking for the RAM dump: %d", mhi_force_rddm_mode(ath12k_pci_priv(ab)->mhi_ctrl));
 }
 static void log_tap(int level, const char *line) {
