@@ -201,7 +201,7 @@ static void to_eth(struct sk_buff *skb) {
   if (skb->len < hl + 8) return;
   const u8 *llc = skb->data + hl; if (llc[0] != 0xaa || llc[1] != 0xaa || llc[2] != 3) return;
   unsigned plen = skb->len - hl - 8; if (plen > 2000) return;
-  u8 eth[14 + 2000]; memcpy(eth, h->addr1, 6); memcpy(eth + 6, h->addr3, 6); memcpy(eth + 12, llc + 6, 2); memcpy(eth + 14, llc + 8, plen);
+  static u8 eth[14 + 2000]; memcpy(eth, h->addr1, 6); memcpy(eth + 6, h->addr3, 6); memcpy(eth + 12, llc + 6, 2); memcpy(eth + 14, llc + 8, plen);
   if (eth[12] == 0x88 && eth[13] == 0x8e) return;   /* EAPOL belongs to the handshake */
   if (g_ev.rx) g_ev.rx(eth, 14 + plen); }
 
