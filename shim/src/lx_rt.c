@@ -65,18 +65,24 @@ void lx_free_irq(unsigned int irq, void *id) { for (int i = 0; i < 64; i++) if (
 void lx_irq_raise(unsigned int irq) { for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].irq == irq) g_irq[i].pending = 1; }
 
 void lx_irq_raise_all(void);
+volatile uint64_t nw_wifi_where[4];
+static void where(int kind, const void *fn) {
+  nw_wifi_where[0] = kind; nw_wifi_where[1] = fn ? (uint64_t)((uintptr_t)fn - (uintptr_t)lx_now_ms) : 0;
+  nw_wifi_where[2] = g_depth; nw_wifi_where[3] = lx_now_ms(); }
 /* The dispatcher: interrupts first, then due timers, then one round of queued work. */
 int lx_pump(void) {
   int ran = 0;
   if (g_depth > LX_MAX_DEPTH) return 0;
   { char here; if (!g_stack_top) g_stack_top = &here; unsigned long used = (unsigned long)(g_stack_top - &here); if (used > lx_stack_peak && used < (1UL << 24)) lx_stack_peak = used; if ((unsigned long)g_depth + 1 > lx_depth_peak) lx_depth_peak = g_depth + 1; }
   g_depth++;
+  where(4, (const void *)lx_plat->poll);
   lx_plat->poll();
   /* The endpoint's interrupts are writes into a sink nobody watches: every handler is offered a look about once a millisecond, in every wait as well
    * as in the board's loop (a handler finds out from its own device registers whether there is anything to do). */
   { static u64 last_raise; u64 t = lx_now_ms(); if (t != last_raise) { last_raise = t; lx_irq_raise_all(); } }
   for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].pending) {
     g_irq[i].pending = 0; ran = 1;
+    where(1, (const void *)g_irq[i].h);
     irqreturn_t r = g_irq[i].h ? g_irq[i].h(g_irq[i].irq, g_irq[i].id) : IRQ_WAKE_THREAD;
     if (r == IRQ_WAKE_THREAD && g_irq[i].t) g_irq[i].t(g_irq[i].irq, g_irq[i].id);
   }
@@ -84,15 +90,17 @@ int lx_pump(void) {
   struct list_head *p, *n;
   for (p = g_timers.next; p != &g_timers; p = n) {
     n = p->next; struct delayed_work *d = container_of(p, struct delayed_work, work.entry);
-    if (d->armed && now >= d->due) { d->armed = 0; list_del_init(p); ran = 1; d->work.func(&d->work); }
+    if (d->armed && now >= d->due) { d->armed = 0; list_del_init(p); ran = 1; where(2, (const void *)d->work.func); d->work.func(&d->work); }
   }
   /* one item at a time off the shared list, so a wait inside a work function still reaches work queued behind it */
   for (int budget = 256; budget > 0 && !list_empty(&g_work); budget--) {
     struct work_struct *w = list_first_entry(&g_work, struct work_struct, entry);
     list_del_init(&w->entry); w->queued = 0; ran = 1;
+    where(3, (const void *)w->func);
     if (w->func) w->func(w);
   }
   g_depth--;
+  where(0, 0);
   return ran;
 }
 void lx_idle(unsigned int ms) { lx_plat->sleep_ms(ms); }

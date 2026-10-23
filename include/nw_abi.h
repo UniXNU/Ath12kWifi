@@ -58,6 +58,9 @@ int nw_wifi_start(const struct lx_platform *p, const struct nw_board *b);
 int nw_wifi_step(void);
 void nw_wifi_stop(void);
 extern struct nw_wifi_stats nw_wifi_stats;
+/* What the dispatcher runs now: kind (1 interrupt handler, 2 timer, 3 work, 4 board poll, 0 nothing), the function as an offset from
+ * lx_now_ms, the nesting depth and the millisecond it started. A board can show it when the module stops making progress. */
+extern volatile uint64_t nw_wifi_where[4];
 #ifdef __cplusplus
 }
 #endif
