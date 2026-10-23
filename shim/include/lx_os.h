@@ -197,9 +197,11 @@ void lx_irq_raise(unsigned int irq);
 #define request_irq(i, h, f, n, d) lx_request_irq(i, h, 0, f, n, d)
 #define request_threaded_irq(i, h, t, f, n, d) lx_request_irq(i, h, t, f, n, d)
 #define free_irq(i, d) lx_free_irq(i, d)
-#define enable_irq(i) ((void)(i))
-#define disable_irq(i) ((void)(i))
-#define disable_irq_nosync(i) ((void)(i))
+void lx_disable_irq(unsigned int irq);
+void lx_enable_irq(unsigned int irq);
+#define enable_irq(i) lx_enable_irq(i)
+#define disable_irq(i) lx_disable_irq(i)
+#define disable_irq_nosync(i) lx_disable_irq(i)
 #define synchronize_irq(i) ((void)(i))
 #define irq_set_affinity_hint(i, m) 0
 #define in_interrupt() 0

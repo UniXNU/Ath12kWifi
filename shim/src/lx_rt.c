@@ -13,7 +13,7 @@ const struct lx_platform *lx_plat;
 void (*lx_mmio_trace)(volatile void *a, u32 v);   /* host tests only */
 static struct list_head g_work = LIST_HEAD_INIT(g_work);
 static struct list_head g_timers = LIST_HEAD_INIT(g_timers);   /* delayed_work entries ordered by insertion */
-static struct { int used; unsigned int irq; irq_handler_t h, t; void *id; int pending; } g_irq[64];
+static struct { int used; unsigned int irq; irq_handler_t h, t; void *id; int pending; int disabled; } g_irq[64];
 static u32 g_seed = 0x2545f491u;
 static int g_depth;
 static char *g_stack_top; unsigned long lx_stack_peak, lx_depth_peak;
@@ -59,9 +59,12 @@ void lx_tasklet_schedule(struct tasklet_struct *t) { t->w.func = tasklet_tramp; 
 
 /* interrupts */
 int lx_request_irq(unsigned int irq, irq_handler_t h, irq_handler_t t, unsigned long fl, const char *n, void *id) {
-  (void)fl; (void)n; for (int i = 0; i < 64; i++) if (!g_irq[i].used) { g_irq[i].used = 1; g_irq[i].irq = irq; g_irq[i].h = h; g_irq[i].t = t; g_irq[i].id = id; g_irq[i].pending = 0; return 0; }
+  (void)fl; (void)n; for (int i = 0; i < 64; i++) if (!g_irq[i].used) { g_irq[i].used = 1; g_irq[i].irq = irq; g_irq[i].h = h; g_irq[i].t = t; g_irq[i].id = id; g_irq[i].pending = 0; g_irq[i].disabled = 0; return 0; }
   return -ENOMEM; }
 void lx_free_irq(unsigned int irq, void *id) { for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].irq == irq && g_irq[i].id == id) g_irq[i].used = 0; }
+/* A disabled line keeps what is pending and runs nothing until it is enabled again (the controller is powered down meanwhile). */
+void lx_disable_irq(unsigned int irq) { for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].irq == irq) g_irq[i].disabled++; }
+void lx_enable_irq(unsigned int irq) { for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].irq == irq && g_irq[i].disabled) g_irq[i].disabled--; }
 void lx_irq_raise(unsigned int irq) { for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].irq == irq) g_irq[i].pending = 1; }
 
 void lx_irq_raise_all(void);
@@ -80,7 +83,7 @@ int lx_pump(void) {
   /* The endpoint's interrupts are writes into a sink nobody watches: every handler is offered a look about once a millisecond, in every wait as well
    * as in the board's loop (a handler finds out from its own device registers whether there is anything to do). */
   { static u64 last_raise; u64 t = lx_now_ms(); if (t != last_raise) { last_raise = t; lx_irq_raise_all(); } }
-  for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].pending) {
+  for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].pending && !g_irq[i].disabled) {
     g_irq[i].pending = 0; ran = 1;
     where(1, (const void *)g_irq[i].h);
     irqreturn_t r = g_irq[i].h ? g_irq[i].h(g_irq[i].irq, g_irq[i].id) : IRQ_WAKE_THREAD;
