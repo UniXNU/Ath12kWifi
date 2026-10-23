@@ -22,7 +22,11 @@ static u64 R64(u32 lo) { return ((u64)*R(lo + 4) << 32) | *R(lo); }
 
 /* ---- host memory model: DMA addresses are host pointers masked to 32 bits by the allocator; keep a table ---- */
 static struct { u8 *p; u64 bus; size_t n; } g_mem[8192]; static int g_nmem; static u64 g_next_bus = 0x10000000;
+static size_t g_live, g_peak;
+static size_t arena_size(size_t n) { n = (n + 63) & ~63UL; if (n >= 4096) { n = (n + 4095) & ~4095UL; size_t a = 4096; while (a < n && a < (2u << 20)) a <<= 1; return n + a / 2; } return n; }
 static void *p_dma_alloc(size_t n, uint64_t *bus) {
+  if (n >= 262144) { void *ra = __builtin_return_address(0); fprintf(stderr, "BIG %zu from %p\n", n, ra); }
+  g_live += arena_size(n); if (g_live > g_peak) g_peak = g_live;
   if (g_nmem >= 8192) { { int live = 0; size_t sz[4] = {0}; for (int k = 0; k < g_nmem; k++) if (g_mem[k].p) { live++; } printf("SIM: dma table full, live=%d last sizes:", live); for (int k = g_nmem - 8; k < g_nmem; k++) printf(" %zu", g_mem[k].n); printf("\n"); (void)sz; } abort(); }
   n = (n + 4095) & ~4095UL; void *p = aligned_alloc(4096, n); memset(p, 0, n);
   g_mem[g_nmem].p = p; g_mem[g_nmem].bus = g_next_bus; g_mem[g_nmem].n = n; g_nmem++; *bus = g_next_bus; g_next_bus += n; return p; }
@@ -138,5 +142,7 @@ int main(void) {
   for (int i = 0; i < 40000 && g_ms < 200000; i++) { nw_wifi_step(); lx_idle(1); }
   printf("after run: stage=%u scans=%u err=%d dev-stage=%d time=%llu ms\n", nw_wifi_stats.stage, nw_wifi_stats.scans, nw_wifi_stats.last_err, g_stage, (unsigned long long)g_ms);
   { extern unsigned long lx_stack_peak, lx_depth_peak; printf("stack peak %lu bytes at pump depth %lu\n", lx_stack_peak, lx_depth_peak); }
+  for (int k = 0; k < g_nmem; k++) if (g_mem[k].p && g_mem[k].n >= 65536) printf("SIM: live %zu KiB\n", g_mem[k].n / 1024);
+  printf("SIM: dma allocated, frees not counted: %zu KiB\n", g_peak / 1024);
   return 0;
 }

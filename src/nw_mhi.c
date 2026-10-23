@@ -3,6 +3,9 @@
 #include "linux/mhi.h"
 #include "nw_mhi.h"
 
+/* The MHI core keeps the bulk firmware image it transferred until power down; the device has its own copy once it runs the mission mode. */
+void mhi_free_bhie_table(struct mhi_controller *mhi_cntrl, struct image_info *image_info);
+
 /* Two channels carry the QRTR control traffic (host-to-device 20, device-to-host 21). */
 static const struct mhi_channel_config nw_channels[] = {
   { .num = 20, .name = "IPCR", .num_elements = 64, .event_ring = 1, .dir = DMA_TO_DEVICE, .ee_mask = 0x4, .doorbell = MHI_DB_BRST_DISABLE },
@@ -24,7 +27,10 @@ static void op_runtime_put(struct mhi_controller *c) { (void)c; }
 static void op_status_cb(struct mhi_controller *c, enum mhi_callback cb) {
   struct nw_mhi *n = dev_get_drvdata(c->cntrl_dev);
   n->last_cb = cb;
-  if (cb == MHI_CB_EE_MISSION_MODE) n->mission = 1;
+  if (cb == MHI_CB_EE_MISSION_MODE) {
+    n->mission = 1;
+    if (c->fbc_image) { mhi_free_bhie_table(c, c->fbc_image); c->fbc_image = NULL; }
+  }
   if (cb == MHI_CB_SYS_ERROR || cb == MHI_CB_FATAL_ERROR || cb == MHI_CB_EE_RDDM) n->failed = 1;
 }
 static int op_read_reg(struct mhi_controller *c, void __iomem *a, u32 *out) { (void)c; *out = readl(a); return 0; }
