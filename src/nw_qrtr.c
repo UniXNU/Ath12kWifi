@@ -140,7 +140,7 @@ void nw_qrtr_rx(const void *pkt, size_t len) {
 
 /* sockets */
 int sock_create_kern(struct net *net, int family, int type, int proto, struct socket **res) {
-  (void)net; (void)type; (void)proto; if (family != AF_QIPCRTR) return -EAFNOSUPPORT_LX;
+  (void)net; (void)type; (void)proto; if (family != AF_QIPCRTR) return -EAFNOSUPPORT;
   struct socket *so = lx_alloc(sizeof *so, 1); struct sock *sk = lx_alloc(sizeof *sk, 1); if (!so || !sk) { lx_free(so); lx_free(sk); return -ENOMEM; }
   INIT_LIST_HEAD(&sk->rx); sk->port = g_next_port++; so->sk = sk;
   for (int i = 0; i < MAX_SOCK; i++) if (!g_sock[i]) { g_sock[i] = sk; *res = so; return 0; }
