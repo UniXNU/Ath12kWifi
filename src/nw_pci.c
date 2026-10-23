@@ -49,12 +49,15 @@ int pci_irq_vector(struct pci_dev *d, unsigned int nr) { (void)d; return nw_boar
 struct msi_desc *irq_get_msi_desc(unsigned int irq) { unsigned int i = irq - nw_board->irq_base; return i < 32 ? &g_msi[i] : 0; }
 
 /* the driver is probed once, with the endpoint the board found */
+static u32 sub_ctl_after;
 int pci_register_driver(struct pci_driver *drv) {
   g_drv = drv;
   memset(&g_dev, 0, sizeof g_dev);
   g_dev.vendor = 0x17cb; g_dev.device = nw_board->device_id; g_dev.dev.name = "wlan0pci"; g_dev.dev.dma_mask = 0xffffffffull;
   g_dev.msi_cap = nw_board->msi_cap; g_dev.bus = &g_bus;
   { u32 sub = 0; if (!nw_board->cfg_read(0x2c, 4, &sub)) { g_dev.subsystem_vendor = sub & 0xffff; g_dev.subsystem_device = sub >> 16; } }   /* the board file is picked by these */
+  /* The endpoint reads host memory in the largest pieces its device control register allows: ask for the smallest (128 bytes). */
+  { u32 ctl = 0; if (!nw_board->cfg_read(0x80000008, 2, &ctl)) { nw_board->cfg_write(0x80000008, 2, ctl & ~0x7000u); nw_board->cfg_read(0x80000008, 2, &sub_ctl_after); lx_log(6, "pci: device control %04x -> %04x", ctl, sub_ctl_after); } }
   for (const struct pci_device_id *id = drv->id_table; id && id->vendor; id++)
     if (id->device == g_dev.device) return drv->probe(&g_dev, id);
   return -ENODEV; }
