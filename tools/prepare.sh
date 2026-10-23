@@ -104,6 +104,18 @@ assert 'void nw_board_mac' in s, "mac.c include mark"
 if os.path.lexists(dst): os.remove(dst)
 open(dst, 'w').write(s)
 PY
+# The receive reorder queue descriptors are read by the endpoint, so the copies of dp_rx.c and wifi7/dp_rx.c take them from the DMA window
+# (ordinary heap memory is not reachable by it) and give them back to it.
+python3 - "$A/wifi7/dp_rx.c" "$O/wifi7/dp_rx.c" "$A/dp_rx.c" "$O/dp_rx.c" <<'PY'
+import os, sys
+for src, dst, old, new in ((sys.argv[1], sys.argv[2], 'vaddr = kzalloc(hw_desc_sz + HAL_LINK_DESC_ALIGN - 1, GFP_ATOMIC);', 'vaddr = lx_dma_zalloc(hw_desc_sz + HAL_LINK_DESC_ALIGN - 1);'),
+                           (sys.argv[3], sys.argv[4], '\t\tkfree(tid_qbuf->vaddr);', '\t\tlx_dma_kfree(tid_qbuf->vaddr);')):
+    s = open(src).read()
+    assert s.count(old) == 1, "reoq mark " + old[:20]
+    s = s.replace(old, new, 1)
+    if os.path.lexists(dst): os.remove(dst)
+    open(dst, 'w').write(s)
+PY
 # The copy also shows the bytes of an event it does not know.
 python3 - "$O/wmi.c" <<'PY'
 import sys

@@ -158,6 +158,8 @@ void ida_free(struct ida *i, unsigned int id) { clear_bit(id, i->bits); }
 
 /* DMA and firmware go to the platform */
 void *lx_dma_alloc(struct device *d, size_t n, dma_addr_t *bus) { (void)d; return lx_plat->dma_alloc(n, bus); }
+void *lx_dma_zalloc(size_t n) { u64 bus; return lx_plat->dma_alloc(n, &bus); }
+void lx_dma_kfree(void *p) { if (p) lx_plat->dma_free(0, p, 0); }
 void lx_dma_free(struct device *d, size_t n, void *p, dma_addr_t bus) { (void)d; lx_plat->dma_free(n, p, bus); }
 dma_addr_t lx_dma_map(struct device *d, void *p, size_t n, int dir) { (void)d; return lx_plat->dma_map(p, n, dir); }
 void lx_dma_sync(struct device *d, dma_addr_t bus, size_t n, int dir) { (void)d; lx_plat->dma_sync(bus, n, dir); }

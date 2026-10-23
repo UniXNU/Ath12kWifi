@@ -208,6 +208,8 @@ void lx_irq_raise(unsigned int irq);
 /* DMA: buffers come from a window the endpoint's IOMMU stream maps; the platform hook returns the bus address */
 enum dma_data_direction { DMA_BIDIRECTIONAL = 0, DMA_TO_DEVICE = 1, DMA_FROM_DEVICE = 2, DMA_NONE = 3 };
 void *lx_dma_alloc(struct device *d, size_t n, dma_addr_t *bus);
+void *lx_dma_zalloc(size_t n);   /* zeroed memory of the DMA window, to be given back with lx_dma_kfree */
+void lx_dma_kfree(void *p);
 void lx_dma_free(struct device *d, size_t n, void *p, dma_addr_t bus);
 dma_addr_t lx_dma_map(struct device *d, void *p, size_t n, int dir);
 void lx_dma_sync(struct device *d, dma_addr_t bus, size_t n, int dir);
