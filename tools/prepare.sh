@@ -24,4 +24,7 @@ if 'nw_mhi_pre_load' not in s:
     s=s.replace(mark,'\t{ extern void nw_mhi_pre_load(struct mhi_controller *); nw_mhi_pre_load(mhi_cntrl); }\n'+mark,1)
 open(p,'w').write(s)
 PY
+# The refill ring of the receive buffers is the largest user of the endpoint's DMA window; the copy of dp.h makes it 512 buffers instead of 4096.
+rm -f $O/dp.h; sed 's/^#define DP_RXDMA_BUF_RING_SIZE\t\t4096/#define DP_RXDMA_BUF_RING_SIZE\t\t512/' $A/dp.h > $O/dp.h
+grep -q 'DP_RXDMA_BUF_RING_SIZE.*512' $O/dp.h || { echo "dp.h patch missed" >&2; exit 1; }
 ln -sf $L/drivers/bus/mhi/common.h out/common.h
