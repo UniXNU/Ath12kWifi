@@ -119,7 +119,7 @@ void lx_idle(unsigned int ms);   /* nothing ready: let the clock advance and dev
     unsigned long _end = jiffies + (tmo_j); long _r; (void)(w); \
     for (;;) { \
       if (cond) { _r = (long)((_end - jiffies) > 0 ? (_end - jiffies) : 1); break; } \
-      if (!lx_pump()) { if (time_after(jiffies, _end) || jiffies == _end) { _r = 0; break; } lx_idle(1); } } \
+      if (!lx_pump()) { if (time_after(jiffies, _end) || jiffies == _end) { _r = (cond) ? 1 : 0; break; } lx_idle(1); } } \
     _r; })
 #define wait_event(w, cond) ({ (void)(w); while (!(cond)) { if (!lx_pump()) lx_idle(1); } })
 #define wait_event_interruptible(w, cond) ({ wait_event(w, cond); 0; })
