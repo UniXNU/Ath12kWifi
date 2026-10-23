@@ -115,7 +115,7 @@ static int p_fw(const char *n, const uint8_t **d, size_t *s) {
   return -1; }
 static const struct lx_platform plat = { p_now, p_sleep, dev_poll, p_log, p_halt, p_alloc, p_free, p_dma_alloc, p_dma_free, p_dma_map, p_dma_sync, p_fw };
 static int cfg_read(int off, int size, u32 *v) { static u32 msi[4] = { 0x00809005, 0, 0, 0 }; (void)size;
-  if (off == 2) *v = 0x1107; else if (off >= 0x50 && off < 0x60) *v = msi[(off - 0x50) / 4]; else *v = 0; return 0; }
+  if (off == 2) *v = 0x1107; else if (off == 0x2c) *v = 0x110717cb; else if (off >= 0x50 && off < 0x60) *v = msi[(off - 0x50) / 4]; else *v = 0; return 0; }
 static int cfg_write(int off, int size, u32 v) { (void)off; (void)size; (void)v; return 0; }
 static int msi_target(u32 *lo, u32 *hi, u32 *data) { *lo = 0x1000; *hi = 0; *data = 0; return 0; }
 static struct nw_board board;
