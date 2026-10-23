@@ -12,7 +12,7 @@
 #define MAX_BSS 48
 #define IE_MAX 384
 #define EAPOL_RETRY_MS 1500
-#define STEP_TIMEOUT_MS 2500
+#define STEP_TIMEOUT_MS 300
 
 static u8 OUI_RSN[3] = { 0x00, 0x0f, 0xac };
 
@@ -300,7 +300,7 @@ static void on_mgmt(struct sk_buff *skb) {
     g_vif->bss_conf.assoc_capability = C.ap.caps; g_vif->bss_conf.use_short_slot = true;
     const u8 *tim = find_ie(C.ap.ie, C.ap.ie_len, WLAN_EID_TIM); if (tim && tim[1] >= 2 && tim[3]) g_vif->bss_conf.dtim_period = tim[3];
     if (set_sta_state(IEEE80211_STA_ASSOC)) { connect_done(NW_RES_FAILED); return; }
-    g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_BSSID | BSS_CHANGED_BASIC_RATES | BSS_CHANGED_BEACON_INT | BSS_CHANGED_ERP_SLOT | BSS_CHANGED_ASSOC);
+    g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_BSSID | BSS_CHANGED_BASIC_RATES | BSS_CHANGED_BEACON_INT | BSS_CHANGED_ERP_SLOT);   /* the association itself is a change of the interface, below */
     g_ops->vif_cfg_changed(g_hw, g_vif, BSS_CHANGED_ASSOC | BSS_CHANGED_IDLE | BSS_CHANGED_SSID);
     C.started = lx_now_ms(); C.tries = 0;
     if (C.secure) { C.state = NW_STA_KEYS; lx_log(6, "wifi: associated, waiting for the key handshake"); }
@@ -336,7 +336,7 @@ static void teardown(int notify_lost, int reason) {
   if (C.sta) {
     if (C.ptk_key) { g_ops->set_key(g_hw, DISABLE_KEY, g_vif, C.sta, C.ptk_key); lx_free(C.ptk_key); C.ptk_key = 0; }
     if (C.gtk_key) { g_ops->set_key(g_hw, DISABLE_KEY, g_vif, 0, C.gtk_key); lx_free(C.gtk_key); C.gtk_key = 0; }
-    if (g_vif->cfg.assoc) { g_vif->cfg.assoc = false; g_vif->cfg.aid = 0; g_ops->vif_cfg_changed(g_hw, g_vif, BSS_CHANGED_ASSOC); g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_ASSOC); }
+    if (g_vif->cfg.assoc) { g_vif->cfg.assoc = false; g_vif->cfg.aid = 0; g_ops->vif_cfg_changed(g_hw, g_vif, BSS_CHANGED_ASSOC); }
     while (C.sta_state > IEEE80211_STA_NOTEXIST) { if (g_ops->sta_state(g_hw, g_vif, C.sta, C.sta_state, C.sta_state - 1)) break; C.sta_state--; }
     nw_wifi_sta_set(0); lx_free(C.sta); C.sta = 0; }
   if (C.ctx) { g_ops->unassign_vif_chanctx(g_hw, g_vif, &g_vif->bss_conf, C.ctx); g_ops->remove_chanctx(g_hw, C.ctx); RCU_INIT_POINTER(g_vif->bss_conf.chanctx_conf, NULL); nw_wifi_chanctx_set(0); lx_free(C.ctx); C.ctx = 0; }
@@ -345,11 +345,11 @@ static void teardown(int notify_lost, int reason) {
 static void timer_fn(struct work_struct *w) {
   (void)w; u64 now = lx_now_ms();
   switch (C.state) {
-  case NW_STA_AUTH: if (now - C.last_tx >= STEP_TIMEOUT_MS) { if (++C.tries > 3) { connect_done(NW_RES_TIMEOUT); return; } lx_log(6, "wifi: authentication sent again (try %d)", C.tries + 1); send_auth(); } break;
-  case NW_STA_ASSOC: if (now - C.last_tx >= STEP_TIMEOUT_MS) { if (++C.tries > 3) { connect_done(NW_RES_TIMEOUT); return; } send_assoc(); } break;
+  case NW_STA_AUTH: if (now - C.last_tx >= STEP_TIMEOUT_MS) { if (++C.tries > 7) { connect_done(NW_RES_TIMEOUT); return; } lx_log(6, "wifi: authentication sent again (try %d)", C.tries + 1); send_auth(); } break;
+  case NW_STA_ASSOC: if (now - C.last_tx >= STEP_TIMEOUT_MS) { if (++C.tries > 7) { connect_done(NW_RES_TIMEOUT); return; } send_assoc(); } break;
   case NW_STA_KEYS: if (now - C.started >= 8000) { connect_done(C.hs_stage ? NW_RES_BAD_KEY : NW_RES_TIMEOUT); return; } break;
   default: return; }
-  lx_queue_delayed(&g_timer, 250); }
+  lx_queue_delayed(&g_timer, 100); }
 
 static void start_connect(void) {
   if (C.state != NW_STA_IDLE && C.state != NW_STA_SCANNING) return;
@@ -373,7 +373,7 @@ static void start_connect(void) {
   g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_BSSID | BSS_CHANGED_TXPOWER);
   C.state = NW_STA_AUTH; C.tries = 0; C.started = lx_now_ms(); nw_wifi_stats.stage = 7;
   lx_log(6, "wifi: connecting to %02x:%02x:%02x:%02x:%02x:%02x on %u MHz, signal %d dBm, transmit power %d dBm", C.ap.bssid[0], C.ap.bssid[1], C.ap.bssid[2], C.ap.bssid[3], C.ap.bssid[4], C.ap.bssid[5], C.ap.freq, C.ap.signal, g_vif->bss_conf.txpower);
-  send_auth(); lx_queue_delayed(&g_timer, 250); }
+  send_auth(); lx_queue_delayed(&g_timer, 100); }
 
 /* ---- the data path ---- */
 static void send_queued(void) {
