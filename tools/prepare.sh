@@ -49,7 +49,7 @@ old = ('\tif (!ag->mlo_capable) {\n'
 assert s.count(old) == 1, "qmi.c mlo mark"
 s = s.replace(old, '', 1)
 # The PHY capability reply can say the firmware takes host memory on demand (TLV 0x17); the host capability message then says the host
-# offers it (TLV 0x33). Without that answer the firmware leaves its host memory segment unused.
+# offers it (TLV 0x33). Without that answer the firmware leaves its host memory segment unused. This copy offers it whatever the reply said.
 def elem(tlv, struct, field, flag):
     return ('\t{\n\t\t.data_type\t= %s,\n\t\t.elem_len\t= 1,\n\t\t.elem_size\t= sizeof(u8),\n\t\t.array_type\t= NO_ARRAY,\n'
             '\t\t.tlv_type\t= %s,\n\t\t.offset\t\t= offsetof(%s, %s),\n\t},\n'
@@ -65,7 +65,7 @@ s = s.replace(old, old + '\tnw_on_demand_ddr = resp.nw_on_demand_ddr_valid && re
               '\tath12k_dbg(ab, ATH12K_DBG_QMI, "phy capability: host memory on demand %u\\n", nw_on_demand_ddr);\n', 1)
 old = '\tret = ath12k_host_cap_parse_mlo(ab, &req);\n'
 assert s.count(old) == 1, "qmi.c host cap mark"
-s = s.replace(old, '\tif (nw_on_demand_ddr) {\n\t\treq.nw_on_demand_mem_valid = 1;\n\t\treq.nw_on_demand_mem = 1;\n\t}\n\n' + old, 1)
+s = s.replace(old, '\treq.nw_on_demand_mem_valid = 1;\n\treq.nw_on_demand_mem = 1;\n\n' + old, 1)
 old = '#include "qmi.h"\n'
 assert s.count(old) == 1, "qmi.c include mark"
 s = s.replace(old, old + '\n/* the firmware said it takes host memory on demand */\nstatic u8 nw_on_demand_ddr;\n', 1)

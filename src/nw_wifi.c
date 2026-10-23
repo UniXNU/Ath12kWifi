@@ -75,6 +75,27 @@ static void ddr_check(struct ath12k_base *ab) {
     lx_log(3, "stuck: ddr segment: %d read-only pages of %zu differ from the file", bad, (end - 0xe9000) / 4096);
   }
 }
+/* What the endpoint's configuration space says about the link and about errors it saw: command and status, the PCI Express device and link
+ * registers, and the advanced error reporting registers (uncorrectable and correctable status, first error pointer, header log). */
+static void pci_state(void) {
+  u32 v, v2, v3, v4;
+  if (!nw_board->cfg_read(0x04, 4, &v)) lx_log(3, "stuck: pci command/status %08x", v);
+  if (!nw_board->cfg_read(0x80000008, 4, &v) && !nw_board->cfg_read(0x8000000c, 4, &v2) && !nw_board->cfg_read(0x80000010, 4, &v3))
+    lx_log(3, "stuck: pcie devctl/sta %08x linkcap %08x linkctl/sta %08x", v, v2, v3);
+  for (u32 at = 0x100, guard = 0; at >= 0x100 && at < 0x1000 && guard < 32; guard++) {
+    if (nw_board->cfg_read(at, 4, &v)) break;
+    if ((v & 0xffff) == 1) {
+      u32 ue = 0, uem = 0, ces = 0, cap = 0;
+      nw_board->cfg_read(at + 4, 4, &ue); nw_board->cfg_read(at + 8, 4, &uem); nw_board->cfg_read(at + 0x10, 4, &ces); nw_board->cfg_read(at + 0x18, 4, &cap);
+      lx_log(3, "stuck: aer at %x ue %08x mask %08x ce %08x cap %08x", at, ue, uem, ces, cap);
+      nw_board->cfg_read(at + 0x1c, 4, &v); nw_board->cfg_read(at + 0x20, 4, &v2); nw_board->cfg_read(at + 0x24, 4, &v3); nw_board->cfg_read(at + 0x28, 4, &v4);
+      lx_log(3, "stuck: aer header log %08x %08x %08x %08x", v, v2, v3, v4);
+      return;
+    }
+    at = v >> 20;
+  }
+  lx_log(3, "stuck: no aer capability");
+}
 static void wmi_stuck(void) {
   if (g_wmi_stuck != 1 || !g_hw) return;
   g_wmi_stuck = 2;
@@ -82,6 +103,7 @@ static void wmi_stuck(void) {
   for (int p = 1; p <= 4; p++) ring_state(ab, p);
   lx_log(3, "stuck: wmi credits %d, mhi ee %d state %d", ab->htc.endpoint[ATH12K_HTC_EP_2].tx_credits, ath12k_pci_priv(ab)->mhi_ctrl->ee,
          ath12k_pci_priv(ab)->mhi_ctrl->dev_state);
+  pci_state();
   ddr_check(ab);
   lx_log(3, "stuck: asking for the RAM dump: %d", mhi_force_rddm_mode(ath12k_pci_priv(ab)->mhi_ctrl));
 }
