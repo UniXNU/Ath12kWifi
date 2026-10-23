@@ -43,7 +43,7 @@ static struct {
   u64 started; u64 last_tx; int tries; int rsn_ok; u16 aid;
 } C;
 static struct delayed_work g_timer; static struct delayed_work g_scan_timer;
-static int g_scan_running; static int g_scan_directed; static u8 g_scan_ssid[32]; static u8 g_scan_ssid_len;
+static int g_scan_running; static int g_connect_waits; static int g_scan_directed; static u8 g_scan_ssid[32]; static u8 g_scan_ssid_len;
 
 static void tx_frame(struct sk_buff *skb);
 static void connect_done(int res);
@@ -78,7 +78,7 @@ int nw_wifi_bss_get(int i, struct nw_bss_info *o) {
 
 /* ---- scanning ---- */
 static void do_scan(const u8 *ssid, u8 len) {
-  if (!g_hw || !g_vif || g_scan_running) return;
+  if (!g_hw || !g_vif || g_scan_running || g_connect_waits || (C.state >= NW_STA_AUTH && C.state != NW_STA_UP)) return;
   int n = 0; for (int b = 0; b < NUM_NL80211_BANDS; b++) if (g_hw->wiphy->bands[b]) n += g_hw->wiphy->bands[b]->n_channels;
   struct ieee80211_scan_request *rq = lx_alloc(sizeof *rq + sizeof(struct ieee80211_channel *) * n + 2 * sizeof(struct cfg80211_ssid), 1); if (!rq) return;
   struct cfg80211_ssid *ss = (struct cfg80211_ssid *)((u8 *)rq + sizeof *rq + sizeof(struct ieee80211_channel *) * n);
@@ -403,7 +403,10 @@ void nw_sta_run(void) {
   int kind; lock(); kind = g_req.kind; g_req.kind = REQ_NONE; unlock();
   if (g_vif) {
     if (kind == REQ_SCAN) do_scan(g_scan_directed ? g_scan_ssid : 0, g_scan_directed ? g_scan_ssid_len : 0);
+    else if (kind == REQ_CONNECT && g_scan_running) {   /* the radio leaves the channel while it scans: the join waits for the scan's end */
+      if (!g_connect_waits) { g_connect_waits = 1; lx_log(6, "wifi: join waits for the running scan, which is cancelled"); g_ops->cancel_hw_scan(g_hw, g_vif); } }
     else if (kind == REQ_CONNECT) start_connect();
+    if (g_connect_waits && !g_scan_running) { g_connect_waits = 0; start_connect(); }
     else if (kind == REQ_DISCONNECT && C.state >= NW_STA_AUTH) { teardown(0, 0); C.state = NW_STA_IDLE; }
     if (C.state == NW_STA_UP || C.state >= NW_STA_AUTH) send_queued(); } }
 void nw_sta_link_lost(void) { if (C.state >= NW_STA_AUTH) teardown(1, 0); }
