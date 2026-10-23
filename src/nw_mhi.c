@@ -78,7 +78,15 @@ void nw_mhi_unregister(struct nw_mhi *n) {
 #define NW_BOOT_SETTLE_MS 200
 #endif
 int mhi_init_mmio(struct mhi_controller *mhi_cntrl);
+static struct mhi_controller *g_loaded;
+/* Once the device runs its mission mode the bulk image it was given (several MiB of the DMA window) is not read again: it is released. */
+void nw_mhi_release_image(void) {
+  struct mhi_controller *c = g_loaded;
+  if (!c || !c->fbc_image || c->ee != MHI_EE_AMSS) return;
+  mhi_free_bhie_table(c, c->fbc_image); c->fbc_image = NULL;
+  lx_log(6, "mhi: bulk image released"); }
 void nw_mhi_pre_load(struct mhi_controller *c) {
+  g_loaded = c;
   static int done; if (done) return; done = 1;
   lx_delay_ms(NW_BOOT_SETTLE_MS);
   int r = mhi_init_mmio(c);
