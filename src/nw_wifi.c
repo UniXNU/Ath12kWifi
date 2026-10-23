@@ -40,11 +40,46 @@ static void ring_state(struct ath12k_base *ab, int p) {
     lx_log(3, "stuck: ce%d src sw %u write %u hp %u reap %u cached-tp %u tp %u", p, pipe->src_ring->sw_index, pipe->src_ring->write_index,
            s->u.src_ring.hp, s->u.src_ring.reap_hp, s->u.src_ring.cached_tp, s->u.src_ring.tp_addr ? *(volatile u32 *)s->u.src_ring.tp_addr : 0xffffffffu);
   }
-  if (pipe->dest_ring) {
+  if (pipe->dest_ring) {   /* the host fills the buffer ring (a source ring to the host) and reads the status ring */
     struct hal_srng *s = &ab->hal.srng_list[pipe->dest_ring->hal_ring_id];
-    lx_log(3, "stuck: ce%d dst sw %u write %u tp %u cached-hp %u hp %u needed %u", p, pipe->dest_ring->sw_index, pipe->dest_ring->write_index,
-           s->u.dst_ring.tp, s->u.dst_ring.cached_hp, s->u.dst_ring.hp_addr ? *s->u.dst_ring.hp_addr : 0xffffffffu, pipe->rx_buf_needed);
+    lx_log(3, "stuck: ce%d buf sw %u write %u hp %u cached-tp %u tp %u needed %u", p, pipe->dest_ring->sw_index, pipe->dest_ring->write_index,
+           s->u.src_ring.hp, s->u.src_ring.cached_tp, s->u.src_ring.tp_addr ? *(volatile u32 *)s->u.src_ring.tp_addr : 0xffffffffu, pipe->rx_buf_needed);
   }
+  if (pipe->status_ring) {
+    struct hal_srng *s = &ab->hal.srng_list[pipe->status_ring->hal_ring_id];
+    lx_log(3, "stuck: ce%d status sw %u tp %u cached-hp %u hp %u", p, pipe->status_ring->sw_index, s->u.dst_ring.tp, s->u.dst_ring.cached_hp,
+           s->u.dst_ring.hp_addr ? *s->u.dst_ring.hp_addr : 0xffffffffu);
+  }
+}
+/* The firmware pages its code and data in from the bulk image the host keeps (and writes changed data pages back to it): the image's segments are
+ * logged with the pages that no longer equal the firmware file, so a page the host has overwritten shows. */
+static void image_check(struct mhi_controller *mc) {
+  struct image_info *img = mc->fbc_image; const u8 *fw; size_t n;
+  if (!img) { lx_log(3, "stuck: no bulk image"); return; }
+  if (lx_plat->fw_get("amss.bin", &fw, &n)) { lx_log(3, "stuck: firmware file not readable"); return; }
+  u64 next = img->mhi_buf[0].dma_addr; int gaps = 0;
+  for (u32 i = 0; i < img->entries; i++) {
+    struct mhi_buf *b = &img->mhi_buf[i];
+    if (b->dma_addr != next || i + 1 == img->entries) lx_log(3, "stuck: image seg %u at %llx len %zx", i, (unsigned long long)b->dma_addr, b->len);
+    if (b->dma_addr != next) gaps++;
+    next = b->dma_addr + b->len;
+  }
+  size_t off = 0; int bad = 0, shown = 0;
+  for (u32 i = 0; i + 1 < img->entries && off < n; i++) {
+    const u8 *p = img->mhi_buf[i].buf; size_t len = img->mhi_buf[i].len;
+    for (size_t pg = 0; pg < len && off + pg < n; pg += 4096) {
+      size_t m = len - pg < 4096 ? len - pg : 4096; if (off + pg + m > n) m = n - off - pg;
+      if (!memcmp(p + pg, fw + off + pg, m)) continue;
+      bad++;
+      if (shown < 24) {
+        size_t k = 0; while (k < m && p[pg + k] == fw[off + pg + k]) k++;
+        u32 now, was; memcpy(&now, p + pg + (k & ~3u), 4); memcpy(&was, fw + off + pg + (k & ~3u), 4);
+        lx_log(3, "stuck: image page %zx differs from %zx: %08x, file %08x", off + pg, off + pg + k, now, was); shown++;
+      }
+    }
+    off += len;
+  }
+  lx_log(3, "stuck: image %u segments, %d gaps, %d of %zu pages differ from the file", img->entries, gaps, bad, (n + 4095) / 4096);
 }
 static void wmi_stuck(void) {
   if (g_wmi_stuck != 1 || !g_hw) return;
@@ -53,6 +88,7 @@ static void wmi_stuck(void) {
   for (int p = 1; p <= 4; p++) ring_state(ab, p);
   lx_log(3, "stuck: wmi credits %d, mhi ee %d state %d", ab->htc.endpoint[ATH12K_HTC_EP_2].tx_credits, ath12k_pci_priv(ab)->mhi_ctrl->ee,
          ath12k_pci_priv(ab)->mhi_ctrl->dev_state);
+  image_check(ath12k_pci_priv(ab)->mhi_ctrl);
   lx_log(3, "stuck: asking for the RAM dump: %d", mhi_force_rddm_mode(ath12k_pci_priv(ab)->mhi_ctrl));
 }
 static void log_tap(int level, const char *line) {
