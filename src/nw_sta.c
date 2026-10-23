@@ -156,7 +156,7 @@ static int bring_up_channel(void) {
   int r = g_ops->add_chanctx(g_hw, ctx); if (r) { lx_free(ctx); return r; }
   C.ctx = ctx; rcu_assign_pointer(g_vif->bss_conf.chanctx_conf, ctx); nw_wifi_chanctx_set(ctx);
   g_vif->bss_conf.bssid = C.ap.bssid; memcpy(g_vif->cfg.ap_addr, C.ap.bssid, 6);
-  g_vif->bss_conf.chanreq.oper = ctx->def; g_vif->bss_conf.beacon_int = C.ap.interval ? C.ap.interval : 100; g_vif->bss_conf.dtim_period = 1;
+  g_vif->bss_conf.chanreq.oper = ctx->def; g_vif->bss_conf.txpower = ch->max_power; g_vif->bss_conf.txpower_type = NL80211_TX_POWER_AUTOMATIC; g_vif->bss_conf.beacon_int = C.ap.interval ? C.ap.interval : 100; g_vif->bss_conf.dtim_period = 1;
   g_vif->cfg.ssid_len = C.ssid_len; memcpy(g_vif->cfg.ssid, C.ssid, C.ssid_len);
   C.chanctx_up = 1;
   return 0; }
@@ -345,7 +345,7 @@ static void teardown(int notify_lost, int reason) {
 static void timer_fn(struct work_struct *w) {
   (void)w; u64 now = lx_now_ms();
   switch (C.state) {
-  case NW_STA_AUTH: if (now - C.last_tx >= STEP_TIMEOUT_MS) { if (++C.tries > 3) { connect_done(NW_RES_TIMEOUT); return; } send_auth(); } break;
+  case NW_STA_AUTH: if (now - C.last_tx >= STEP_TIMEOUT_MS) { if (++C.tries > 3) { connect_done(NW_RES_TIMEOUT); return; } lx_log(6, "wifi: authentication sent again (try %d)", C.tries + 1); send_auth(); } break;
   case NW_STA_ASSOC: if (now - C.last_tx >= STEP_TIMEOUT_MS) { if (++C.tries > 3) { connect_done(NW_RES_TIMEOUT); return; } send_assoc(); } break;
   case NW_STA_KEYS: if (now - C.started >= 8000) { connect_done(C.hs_stage ? NW_RES_BAD_KEY : NW_RES_TIMEOUT); return; } break;
   default: return; }
@@ -370,9 +370,9 @@ static void start_connect(void) {
   int r = bring_up_channel(); if (r) { lx_log(3, "wifi: channel setup failed: %d", r); connect_done(NW_RES_FAILED); return; }
   r = g_ops->assign_vif_chanctx(g_hw, g_vif, &g_vif->bss_conf, C.ctx); if (r) { lx_log(3, "wifi: channel assign failed: %d", r); connect_done(NW_RES_FAILED); return; }
   r = add_station(); if (r) { lx_log(3, "wifi: station setup failed: %d", r); connect_done(NW_RES_FAILED); return; }
-  g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_BSSID);
+  g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_BSSID | BSS_CHANGED_TXPOWER);
   C.state = NW_STA_AUTH; C.tries = 0; C.started = lx_now_ms(); nw_wifi_stats.stage = 7;
-  lx_log(6, "wifi: connecting to %02x:%02x:%02x:%02x:%02x:%02x on %u MHz", C.ap.bssid[0], C.ap.bssid[1], C.ap.bssid[2], C.ap.bssid[3], C.ap.bssid[4], C.ap.bssid[5], C.ap.freq);
+  lx_log(6, "wifi: connecting to %02x:%02x:%02x:%02x:%02x:%02x on %u MHz, signal %d dBm, transmit power %d dBm", C.ap.bssid[0], C.ap.bssid[1], C.ap.bssid[2], C.ap.bssid[3], C.ap.bssid[4], C.ap.bssid[5], C.ap.freq, C.ap.signal, g_vif->bss_conf.txpower);
   send_auth(); lx_queue_delayed(&g_timer, 250); }
 
 /* ---- the data path ---- */
