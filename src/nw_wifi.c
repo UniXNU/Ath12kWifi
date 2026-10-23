@@ -10,6 +10,8 @@
 #include "nw_wifi.h"
 #include "nw_sta.h"
 #include "nw_board.h"
+#include "pci.h"
+#include <linux/mhi.h>
 
 int ath12k_wifi7_pci_init(void);
 void ath12k_wifi7_pci_exit(void);
@@ -20,15 +22,42 @@ struct nw_wifi_stats nw_wifi_stats;
 static void on_rx(struct ieee80211_hw *hw, struct sk_buff *skb) { (void)hw; nw_sta_rx(skb); }
 static void on_scan_done(struct ieee80211_hw *hw, bool aborted) { (void)hw; nw_sta_scan_done(aborted); }
 static void on_lost(void) { nw_sta_link_lost(); }
-static void on_registered(struct ieee80211_hw *hw) { nw_sta_ready(hw); }
+static struct ieee80211_hw *g_hw;
+static void on_registered(struct ieee80211_hw *hw) { g_hw = hw; nw_sta_ready(hw); }
 static const struct nw_wifi_hooks hooks = { .registered = on_registered, .rx = on_rx, .scan_done = on_scan_done, .beacon_loss = on_lost };
 
 /* The first time the MHI core reports the device's RAM dump state, the boot interface's registers say where the boot stopped. */
 static int has_text(const char *s, const char *w) {
   for (; *s; s++) { const char *a = s, *b = w; while (*a && *b && *a == *b) { a++; b++; } if (!*b) return 1; }
   return 0; }
+/* The first WMI command that times out: the copy engines' ring positions (host and device side) and the WMI credits are logged, then the device is
+ * asked for its RAM dump, which shows where the firmware stands. */
+static int g_wmi_stuck;
+static void ring_state(struct ath12k_base *ab, int p) {
+  struct ath12k_ce_pipe *pipe = &ab->ce.ce_pipe[p];
+  if (pipe->src_ring) {
+    struct hal_srng *s = &ab->hal.srng_list[pipe->src_ring->hal_ring_id];
+    lx_log(3, "stuck: ce%d src sw %u write %u hp %u reap %u cached-tp %u tp %u", p, pipe->src_ring->sw_index, pipe->src_ring->write_index,
+           s->u.src_ring.hp, s->u.src_ring.reap_hp, s->u.src_ring.cached_tp, s->u.src_ring.tp_addr ? *(volatile u32 *)s->u.src_ring.tp_addr : 0xffffffffu);
+  }
+  if (pipe->dest_ring) {
+    struct hal_srng *s = &ab->hal.srng_list[pipe->dest_ring->hal_ring_id];
+    lx_log(3, "stuck: ce%d dst sw %u write %u tp %u cached-hp %u hp %u needed %u", p, pipe->dest_ring->sw_index, pipe->dest_ring->write_index,
+           s->u.dst_ring.tp, s->u.dst_ring.cached_hp, s->u.dst_ring.hp_addr ? *s->u.dst_ring.hp_addr : 0xffffffffu, pipe->rx_buf_needed);
+  }
+}
+static void wmi_stuck(void) {
+  if (g_wmi_stuck != 1 || !g_hw) return;
+  g_wmi_stuck = 2;
+  struct ath12k *ar = ath12k_ah_to_ar(g_hw->priv, 0); struct ath12k_base *ab = ar->ab;
+  for (int p = 1; p <= 4; p++) ring_state(ab, p);
+  lx_log(3, "stuck: wmi credits %d, mhi ee %d state %d", ab->htc.endpoint[ATH12K_HTC_EP_2].tx_credits, ath12k_pci_priv(ab)->mhi_ctrl->ee,
+         ath12k_pci_priv(ab)->mhi_ctrl->dev_state);
+  lx_log(3, "stuck: asking for the RAM dump: %d", mhi_force_rddm_mode(ath12k_pci_priv(ab)->mhi_ctrl));
+}
 static void log_tap(int level, const char *line) {
   static int done; (void)level;
+  if (!g_wmi_stuck && has_text(line, "wmi command") && has_text(line, "timeout")) g_wmi_stuck = 1;
   if (done || !has_text(line, "MHI_CB_EE_RDDM") || !nw_board || !nw_board->bar) return;
   done = 1;
   const volatile u8 *m = nw_board->bar; u32 bhi = readl(m + 0x28);
@@ -66,5 +95,5 @@ int nw_wifi_start(const struct lx_platform *p, const struct nw_board *b) {
   r = ath12k_wifi7_pci_init();
   if (r) { nw_wifi_stats.last_err = r; lx_log(3, "wifi: driver start failed: %d", r); return r; }
   nw_wifi_stats.stage = 2; return 0; }
-int nw_wifi_step(void) { irq_poll(); int r = lx_pump(); nw_sta_run(); return r; }
+int nw_wifi_step(void) { irq_poll(); int r = lx_pump(); nw_sta_run(); wmi_stuck(); return r; }
 void nw_wifi_stop(void) { ath12k_wifi7_pci_exit(); }
