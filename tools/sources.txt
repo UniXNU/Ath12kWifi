@@ -1,4 +1,5 @@
 # source files of the module, relative to the module directory; "ath12k:" and "mhi:" prefixes name the generated trees
+src/nw_crypto.c
 src/nw_debug.c
 src/nw_mac80211.c
 src/nw_mhi.c
@@ -6,6 +7,7 @@ src/nw_net.c
 src/nw_pci.c
 src/nw_qrtr.c
 src/nw_qrtr_mhi.c
+src/nw_sta.c
 src/nw_wifi.c
 shim/src/lx_rt.c
 shim/src/mhi_hook.c
