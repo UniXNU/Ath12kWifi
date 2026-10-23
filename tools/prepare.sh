@@ -27,4 +27,7 @@ PY
 # The refill ring of the receive buffers is the largest user of the endpoint's DMA window; the copy of dp.h makes it 512 buffers instead of 4096.
 rm -f $O/dp.h; sed 's/^#define DP_RXDMA_BUF_RING_SIZE\t\t4096/#define DP_RXDMA_BUF_RING_SIZE\t\t512/' $A/dp.h > $O/dp.h
 grep -q 'DP_RXDMA_BUF_RING_SIZE.*512' $O/dp.h || { echo "dp.h patch missed" >&2; exit 1; }
+# Sending a command is the condition of the wait in ath12k_wmi_cmd_send: that wait must evaluate it once per round and never after it has succeeded.
+rm -f $O/wmi.c; sed '/^int ath12k_wmi_cmd_send(/,/^}/ s/wait_event_timeout(/wait_event_timeout_once(/' $A/wmi.c > $O/wmi.c
+grep -q 'wait_event_timeout_once' $O/wmi.c || { echo "wmi.c patch missed" >&2; exit 1; }
 ln -sf $L/drivers/bus/mhi/common.h out/common.h

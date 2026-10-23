@@ -114,8 +114,12 @@ typedef struct { int unused; } wait_queue_head_t;
 #define wake_up_interruptible(w) ((void)(w))
 int lx_pump(void);               /* runs one round of ready work; returns nonzero if anything ran */
 void lx_idle(unsigned int ms);   /* nothing ready: let the clock advance and device events arrive */
-/* The condition may have side effects (a command is sent when it is evaluated): it is evaluated once per round, and never again after the wait ends. */
 #define wait_event_timeout(w, cond, tmo_j) ({ \
+    unsigned long _end = jiffies + (tmo_j); long _r = 1; (void)(w); \
+    while (!(cond)) { if (!lx_pump()) { if (time_after(jiffies, _end) || jiffies == _end) { _r = 0; break; } lx_idle(1); } } \
+    (cond) ? (_r ? (long)((_end - jiffies) > 0 ? (_end - jiffies) : 1) : 1) : 0; })
+/* The condition may have side effects (a command is sent when it is evaluated): it is evaluated once per round, and never again after the wait ends. */
+#define wait_event_timeout_once(w, cond, tmo_j) ({ \
     unsigned long _end = jiffies + (tmo_j); long _r; (void)(w); \
     for (;;) { \
       if (cond) { _r = (long)((_end - jiffies) > 0 ? (_end - jiffies) : 1); break; } \
