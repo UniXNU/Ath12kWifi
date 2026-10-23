@@ -30,6 +30,9 @@ grep -q 'DP_RXDMA_BUF_RING_SIZE.*512' $O/dp.h || { echo "dp.h patch missed" >&2;
 # Sending a command is the condition of the wait in ath12k_wmi_cmd_send: that wait must evaluate it once per round and never after it has succeeded.
 rm -f $O/wmi.c; sed '/^int ath12k_wmi_cmd_send(/,/^}/ s/wait_event_timeout(/wait_event_timeout_once(/' $A/wmi.c > $O/wmi.c
 grep -q 'wait_event_timeout_once' $O/wmi.c || { echo "wmi.c patch missed" >&2; exit 1; }
+# This board has no radio switch on the chip's pin 48: the WCN7850 entry of the copy of wifi7/hw.c names no rfkill pin, so no switch is configured.
+rm -f $O/wifi7/hw.c; sed 's/^\t\t\.rfkill_pin = 48,/\t\t.rfkill_pin = 0,/' $A/wifi7/hw.c > $O/wifi7/hw.c
+grep -q 'rfkill_pin = 48' $O/wifi7/hw.c && { echo "wifi7/hw.c patch missed" >&2; exit 1; }
 # The copy also shows the bytes of an event it does not know.
 python3 - "$O/wmi.c" <<'PY'
 import sys
