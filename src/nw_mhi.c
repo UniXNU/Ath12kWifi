@@ -64,3 +64,17 @@ int nw_mhi_power_up(struct nw_mhi *n)
 void nw_mhi_power_down(struct nw_mhi *n) { if (n->c) mhi_power_down(n->c, false); }
 void nw_mhi_unregister(struct nw_mhi *n) {
   if (!n->c) return; mhi_unregister_controller(n->c); lx_free(n->c->irq); mhi_free_controller(n->c); n->c = 0; }
+
+/* The boot loader of the chip answered the image with an error code when it was offered right after the reset with no MHI contexts programmed.
+ * The loader that worked on this board waited, then wrote the context registers, then offered the image: do the same (the registers are written
+ * again after the loader's start, as the host's own sequence does). */
+#ifndef NW_BOOT_SETTLE_MS
+#define NW_BOOT_SETTLE_MS 3000
+#endif
+int mhi_init_mmio(struct mhi_controller *mhi_cntrl);
+void nw_mhi_pre_load(struct mhi_controller *c) {
+  static int done; if (done) return; done = 1;
+  lx_delay_ms(NW_BOOT_SETTLE_MS);
+  int r = mhi_init_mmio(c);
+  lx_log(6, "mhi: contexts programmed before the image: %d", r);
+}

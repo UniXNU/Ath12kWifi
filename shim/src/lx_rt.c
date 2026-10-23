@@ -151,13 +151,11 @@ static int has_amss(const char *n) { for (; *n; n++) if (n[0] == 'a' && n[1] == 
 int lx_request_firmware(const struct firmware **fw, const char *name) {
   struct firmware *f = lx_alloc(sizeof *f, 1); if (!f) return -ENOMEM;
   if (lx_plat->fw_get(name, &f->data, &f->size)) { lx_free(f); return -ENOENT; }
-  /* The boot loader of the chip is given time after the chip's reset before the image is offered: with the image offered within a few
-   * milliseconds it answers with an error code (measured on the board); the time here is the one the working hand-written loader waited. */
   static int settled;
   if (!settled && has_amss(name) && f->size >= 4096) {
     u32 sum = 0; const u32 *w = (const u32 *)f->data; for (size_t i = 0; i < 0x80000 / 4 && i < f->size / 4; i++) sum += w[i];
     lx_log(6, "firmware %s: %zu bytes, sum of the first 512 KiB %08x, first word %08x", name, f->size, sum, w[0]);
-    settled = 1; lx_delay_ms(LX_BOOT_SETTLE_MS); }
+    settled = 1; }
   *fw = f; return 0; }
 void lx_release_firmware(const struct firmware *fw) { if (fw) lx_free(fw); }
 

@@ -14,4 +14,14 @@ H=$L/drivers/bus/mhi/host; M=out/mhi-src
 rm -rf $M; mkdir -p $M
 for f in $H/*.c $H/internal.h; do ln -s $f $M/; done
 cp shim/mhi/trace.h $M/trace.h
+# One call is added to the generated copy of boot.c: the chip's boot loader is given its MHI contexts (and some time after the reset) before the image is offered.
+rm -f out/mhi-src/boot.c; cp $H/boot.c out/mhi-src/boot.c
+python3 - <<'PY'
+p='out/mhi-src/boot.c'; s=open(p).read()
+mark='\tret = request_firmware(&firmware, fw_name, dev);'
+assert mark in s
+if 'nw_mhi_pre_load' not in s:
+    s=s.replace(mark,'\t{ extern void nw_mhi_pre_load(struct mhi_controller *); nw_mhi_pre_load(mhi_cntrl); }\n'+mark,1)
+open(p,'w').write(s)
+PY
 ln -sf $L/drivers/bus/mhi/common.h out/common.h
