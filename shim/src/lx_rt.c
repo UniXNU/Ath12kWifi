@@ -57,7 +57,7 @@ void lx_irq_raise(unsigned int irq) { for (int i = 0; i < 64; i++) if (g_irq[i].
 /* The dispatcher: interrupts first, then due timers, then one round of queued work. */
 int lx_pump(void) {
   int ran = 0;
-  if (g_depth > 8) return 0;
+  if (g_depth > 4) return 0;
   g_depth++;
   lx_plat->poll();
   for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].pending) {
