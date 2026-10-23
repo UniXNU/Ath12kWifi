@@ -51,7 +51,22 @@ unsigned long find_first_bit(const unsigned long *a, unsigned long n);
 int device_register(struct device *d);
 #define device_add(d) device_register(d)
 #define device_del(d) device_unregister(d)
-#define memset_io(a, v, n) memset((void *)(a), v, n)
+/* device memory takes only aligned accesses of a single width: never the string functions on a mapped BAR */
+static inline void memset_io(volatile void *a, int v, unsigned long n) {
+  volatile unsigned char *b = (volatile unsigned char *)a; unsigned int w = (unsigned char)v * 0x01010101u;
+  while (n && ((unsigned long)b & 3)) { *b++ = (unsigned char)v; n--; }
+  while (n >= 4) { *(volatile unsigned int *)b = w; b += 4; n -= 4; }
+  while (n) { *b++ = (unsigned char)v; n--; } }
+static inline void memcpy_fromio(void *d, const volatile void *s, unsigned long n) {
+  unsigned char *o = d; const volatile unsigned char *i = (const volatile unsigned char *)s;
+  while (n && (((unsigned long)i | (unsigned long)o) & 3)) { *o++ = *i++; n--; }
+  while (n >= 4) { *(unsigned int *)o = *(const volatile unsigned int *)i; o += 4; i += 4; n -= 4; }
+  while (n) { *o++ = *i++; n--; } }
+static inline void memcpy_toio(volatile void *d, const void *s, unsigned long n) {
+  volatile unsigned char *o = (volatile unsigned char *)d; const unsigned char *i = s;
+  while (n && (((unsigned long)i | (unsigned long)o) & 3)) { *o++ = *i++; n--; }
+  while (n >= 4) { *(volatile unsigned int *)o = *(const unsigned int *)i; o += 4; i += 4; n -= 4; }
+  while (n) { *o++ = *i++; n--; } }
 #define alloc_ordered_workqueue(...) alloc_workqueue(0)
 #define postcore_initcall(f)
 #define module_init(f)
