@@ -266,4 +266,5 @@ static inline void __skb_queue_before(struct sk_buff_head *q, struct sk_buff *ne
 static inline struct sk_buff *skb_peek_tail(const struct sk_buff_head *q) { struct sk_buff *s = q->prev; return s == (const struct sk_buff *)q ? 0 : s; }
 #define smp_processor_id() 0
 #define PCI_VDEVICE(v, d) .vendor = PCI_VENDOR_ID_##v, .device = (d), .subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID
+#define ffz(x) __builtin_ctzl(~(x))
 #endif
