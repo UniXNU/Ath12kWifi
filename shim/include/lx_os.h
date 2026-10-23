@@ -112,6 +112,7 @@ typedef struct { int unused; } wait_queue_head_t;
 #define wake_up(w) ((void)(w))
 #define wake_up_all(w) ((void)(w))
 #define wake_up_interruptible(w) ((void)(w))
+extern void (*lx_log_tap)(int level, const char *line);   /* sees every line after it is logged */
 int lx_pump(void);               /* runs one round of ready work; returns nonzero if anything ran */
 void lx_idle(unsigned int ms);   /* nothing ready: let the clock advance and device events arrive */
 #define wait_event_timeout(w, cond, tmo_j) ({ \

@@ -75,7 +75,7 @@ void nw_mhi_unregister(struct nw_mhi *n) {
  * The loader that worked on this board waited, then wrote the context registers, then offered the image: do the same (the registers are written
  * again after the loader's start, as the host's own sequence does). */
 #ifndef NW_BOOT_SETTLE_MS
-#define NW_BOOT_SETTLE_MS 3000
+#define NW_BOOT_SETTLE_MS 200
 #endif
 int mhi_init_mmio(struct mhi_controller *mhi_cntrl);
 void nw_mhi_pre_load(struct mhi_controller *c) {

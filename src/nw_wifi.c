@@ -23,11 +23,25 @@ static void on_lost(void) { nw_sta_link_lost(); }
 static void on_registered(struct ieee80211_hw *hw) { nw_sta_ready(hw); }
 static const struct nw_wifi_hooks hooks = { .registered = on_registered, .rx = on_rx, .scan_done = on_scan_done, .beacon_loss = on_lost };
 
+/* The first time the MHI core reports the device's RAM dump state, the boot interface's registers say where the boot stopped. */
+static int has_text(const char *s, const char *w) {
+  for (; *s; s++) { const char *a = s, *b = w; while (*a && *b && *a == *b) { a++; b++; } if (!*b) return 1; }
+  return 0; }
+static void log_tap(int level, const char *line) {
+  static int done; (void)level;
+  if (done || !has_text(line, "RDDM") || !nw_board || !nw_board->bar) return;
+  done = 1;
+  const volatile u8 *m = nw_board->bar; u32 bhi = readl(m + 0x2c);
+  if (bhi >= nw_board->bar_len) bhi = 0x100;
+  lx_log(3, "rddm: mhistatus %08x mhictrl %08x ee %08x bhi-status %08x err %08x dbg %08x %08x %08x",
+         readl(m + 0x48), readl(m + 0x38), readl(m + bhi + 0x28), readl(m + bhi + 0x2c), readl(m + bhi + 0x30), readl(m + bhi + 0x34),
+         readl(m + bhi + 0x38), readl(m + bhi + 0x3c)); }
+
 void lx_irq_raise_all(void);
 static void irq_poll(void) { lx_irq_raise_all(); }
 int nw_wifi_start(const struct lx_platform *p, const struct nw_board *b) {
   lx_plat = p; nw_board = b; ath12k_debug_mask = 0xffffffffu & ~0x2000u;
-  lx_root_init(); nw_qrtr_init(); nw_wifi_set_hooks(&hooks);
+  lx_root_init(); lx_log_tap = log_tap; nw_qrtr_init(); nw_wifi_set_hooks(&hooks);
   int r = mhi_init_hook(); if (r) return r;
   r = nw_qrtr_mhi_register(); if (r) return r;
   nw_wifi_stats.stage = 1;

@@ -22,8 +22,10 @@ u64 lx_now_ms(void) { return lx_plat->now_ms(); }
 void lx_delay_us(unsigned int us) { lx_delay_ms((us + 999) / 1000 ? (us + 999) / 1000 : 0); if (!us) return; }
 void lx_warn(const char *f, int l) { lx_log(4, "warning at %s:%d", f, l); }
 void lx_bug(const char *f, int l) { lx_log(3, "bug at %s:%d", f, l); lx_plat->halt(); for (;;) {} }
+void (*lx_log_tap)(int level, const char *line);
 void lx_log(int level, const char *fmt, ...) {
-  char b[256]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap); lx_plat->log(level, b); }
+  char b[256]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap); lx_plat->log(level, b);
+  if (lx_log_tap) lx_log_tap(level, b); }
 u32 lx_random_u32(void) { g_seed ^= g_seed << 13; g_seed ^= g_seed >> 17; g_seed ^= g_seed << 5; return g_seed; }
 
 void *lx_alloc(size_t n, int zero) { void *p = lx_plat->alloc(n); if (p && zero) memset(p, 0, n); return p; }
