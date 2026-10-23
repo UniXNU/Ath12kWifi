@@ -29,9 +29,9 @@ static int has_text(const char *s, const char *w) {
   return 0; }
 static void log_tap(int level, const char *line) {
   static int done; (void)level;
-  if (done || !has_text(line, "RDDM") || !nw_board || !nw_board->bar) return;
+  if (done || !has_text(line, "MHI_CB_EE_RDDM") || !nw_board || !nw_board->bar) return;
   done = 1;
-  const volatile u8 *m = nw_board->bar; u32 bhi = readl(m + 0x2c);
+  const volatile u8 *m = nw_board->bar; u32 bhi = readl(m + 0x28);
   if (bhi >= nw_board->bar_len) bhi = 0x100;
   lx_log(3, "rddm: mhistatus %08x mhictrl %08x ee %08x bhi-status %08x err %08x dbg %08x %08x %08x",
          readl(m + 0x48), readl(m + 0x38), readl(m + bhi + 0x28), readl(m + bhi + 0x2c), readl(m + bhi + 0x30), readl(m + bhi + 0x34),
