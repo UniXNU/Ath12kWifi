@@ -316,7 +316,7 @@ void nw_sta_rx(struct sk_buff *skb) {
       return; } }
   if (skb->len < 24) return; nw_wifi_stats.frames++;
   struct ieee80211_hdr *h = (void *)skb->data;
-  if (ieee80211_is_beacon(h->frame_control) || ieee80211_is_probe_resp(h->frame_control)) { nw_wifi_stats.beacons++; note_bss(skb); return; }
+  if (ieee80211_is_beacon(h->frame_control) || ieee80211_is_probe_resp(h->frame_control)) { nw_wifi_stats.beacons++; static int n; if (n < 12) lx_log(6, "wifi: beacon %d: %u bytes", ++n, skb->len); note_bss(skb); return; }
   if (C.state < NW_STA_AUTH) return;
   if (ieee80211_is_mgmt(h->frame_control)) { on_mgmt(skb); return; }
   if (ieee80211_is_data(h->frame_control) && !memcmp(h->addr2, C.ap.bssid, 6)) {

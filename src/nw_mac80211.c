@@ -100,7 +100,11 @@ unsigned int cfg80211_chandef_dfs_cac_time(struct wiphy *w, const struct cfg8021
 
 /* receive and scan completion go to the station code */
 void ieee80211_rx_napi(struct ieee80211_hw *hw, struct ieee80211_sta *sta, struct sk_buff *skb, struct napi_struct *napi) {
-  (void)napi; (void)sta; if (g_hooks.rx) g_hooks.rx(hw, skb); kfree_skb(skb); }
+  static int seen; int n = seen < 12 ? ++seen : 0; (void)napi; (void)sta;
+  if (n) lx_log(6, "wifi: frame %d to the station code, %u bytes", n, skb->len);
+  if (g_hooks.rx) g_hooks.rx(hw, skb);
+  if (n) lx_log(6, "wifi: frame %d handled", n);
+  kfree_skb(skb); }
 void ieee80211_scan_completed(struct ieee80211_hw *hw, struct cfg80211_scan_info *info) { if (g_hooks.scan_done) g_hooks.scan_done(hw, info ? info->aborted : 0); }
 void ieee80211_ready_on_channel(struct ieee80211_hw *hw) { (void)hw; }
 void ieee80211_remain_on_channel_expired(struct ieee80211_hw *hw) { (void)hw; }
