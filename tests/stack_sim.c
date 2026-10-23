@@ -121,7 +121,11 @@ static int msi_target(u32 *lo, u32 *hi, u32 *data) { *lo = 0x1000; *hi = 0; *dat
 static struct nw_board board;
 void lx_irq_raise(unsigned int irq);
 
-static void trace(volatile void *a, u32 v) { if (getenv("T") && (u8 *)a >= g_bar && (u8 *)a < g_bar + 0x1000) printf("[w] %04lx <- %08x\n", (unsigned long)((u8 *)a - g_bar), v); }
+static u32 g_win;
+static void trace(volatile void *a, u32 v) {
+  if (!getenv("T")) return; unsigned long off = (unsigned long)((u8 *)a - g_bar); if ((u8 *)a < g_bar || off >= 0x200000) return;
+  if (off == 0x310c) { g_win = v & 0x3f; printf("[w] window <- %02x\n", v); return; }
+  if (off >= 0x80000) printf("[w] chip %07lx <- %08x\n", ((unsigned long)g_win << 19) | (off - 0x80000), v); else printf("[w] bar %04lx <- %08x\n", off, v); }
 int main(void) {
   extern void (*lx_mmio_trace)(volatile void *, u32); lx_mmio_trace = trace;
   setvbuf(stdout, 0, _IONBF, 0);
