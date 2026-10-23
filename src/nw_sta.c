@@ -417,7 +417,7 @@ void nw_sta_ready(struct ieee80211_hw *hw) {
   r = g_ops->start(hw); if (r) { lx_log(3, "wifi: start failed: %d", r); nw_wifi_stats.last_err = r; return; }
   g_vif = lx_alloc(sizeof *g_vif + hw->vif_data_size + 64, 1); if (!g_vif) return;
   g_vif->type = NL80211_IFTYPE_STATION; g_vif->bss_conf.vif = g_vif; g_vif->bss_conf.link_id = 0; g_vif->link_conf[0] = &g_vif->bss_conf;
-  memcpy(g_vif->addr, hw->wiphy->perm_addr, 6); g_vif->addr_valid = true; g_vif->cab_queue = IEEE80211_INVAL_HW_QUEUE;
+  memcpy(g_vif->addr, hw->wiphy->perm_addr, 6); g_vif->addr_valid = true; memcpy(g_vif->bss_conf.addr, hw->wiphy->perm_addr, 6);   /* a link's own address: the driver makes its vdev with it */ g_vif->cab_queue = IEEE80211_INVAL_HW_QUEUE;
   for (int i = 0; i < IEEE80211_NUM_ACS; i++) g_vif->hw_queue[i] = IEEE80211_INVAL_HW_QUEUE;
   g_vif->offload_flags = IEEE80211_OFFLOAD_ENCAP_ENABLED | IEEE80211_OFFLOAD_DECAP_ENABLED;   /* what the wireless stack gives a station of a driver that supports both */
   r = g_ops->add_interface(hw, g_vif); if (r) { lx_log(3, "wifi: add interface failed: %d", r); nw_wifi_stats.last_err = r; return; }
