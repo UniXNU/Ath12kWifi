@@ -48,6 +48,5 @@ int nw_wifi_start(const struct lx_platform *p, const struct nw_board *b) {
   r = ath12k_wifi7_pci_init();
   if (r) { nw_wifi_stats.last_err = r; lx_log(3, "wifi: driver start failed: %d", r); return r; }
   nw_wifi_stats.stage = 2; return 0; }
-void nw_mhi_release_image(void);
-int nw_wifi_step(void) { irq_poll(); int r = lx_pump(); nw_mhi_release_image(); nw_sta_run(); return r; }
+int nw_wifi_step(void) { irq_poll(); int r = lx_pump(); nw_sta_run(); return r; }
 void nw_wifi_stop(void) { ath12k_wifi7_pci_exit(); }
