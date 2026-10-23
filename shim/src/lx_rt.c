@@ -168,3 +168,6 @@ void *idr_remove(struct idr *i, unsigned long id) { void *p = 0; if (id < i->cap
 int idr_for_each(const struct idr *i, int (*fn)(int, void *, void *), void *data) {
   for (unsigned int n = 0; n < i->cap; n++) if (i->slot[n]) { int r = fn(n, i->slot[n], data); if (r) return r; }
   return 0; }
+
+/* without interrupt delivery from the endpoint, every registered handler is given a turn each round; handlers check their own status */
+void lx_irq_raise_all(void) { for (int i = 0; i < 64; i++) if (g_irq[i].used) g_irq[i].pending = 1; }
