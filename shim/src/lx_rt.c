@@ -142,3 +142,29 @@ int lx_request_firmware(const struct firmware **fw, const char *name) {
   if (lx_plat->fw_get(name, &f->data, &f->size)) { lx_free(f); return -ENOENT; }
   *fw = f; return 0; }
 void lx_release_firmware(const struct firmware *fw) { if (fw) lx_free(fw); }
+
+/* idr */
+void idr_init(struct idr *i) { i->slot = 0; i->cap = 0; i->next = 0; }
+void idr_destroy(struct idr *i) { lx_free(i->slot); idr_init(i); }
+static int idr_grow(struct idr *i, unsigned int need) {
+  if (need < i->cap) return 0;
+  unsigned int nc = i->cap ? i->cap : 16; while (nc <= need) nc *= 2;
+  void **n = lx_alloc(sizeof(void *) * nc, 1); if (!n) return -ENOMEM;
+  if (i->slot) memcpy(n, i->slot, sizeof(void *) * i->cap);
+  lx_free(i->slot); i->slot = n; i->cap = nc; return 0; }
+int idr_alloc(struct idr *i, void *p, int start, int end, gfp_t f) {
+  (void)f; unsigned int hi = end > 0 ? (unsigned int)end : 0x7fffffffu;
+  for (unsigned int n = start; n < hi; n++) {
+    if (n < i->cap && i->slot[n]) continue;
+    if (idr_grow(i, n)) return -ENOMEM;
+    i->slot[n] = p; return n; }
+  return -ENOSPC; }
+int idr_alloc_cyclic(struct idr *i, void *p, int start, int end, gfp_t f) {
+  unsigned int from = i->next > (unsigned int)start ? i->next : (unsigned int)start;
+  int r = idr_alloc(i, p, from, end, f); if (r < 0) r = idr_alloc(i, p, start, end, f);
+  if (r >= 0) i->next = r + 1; return r; }
+void *idr_find(const struct idr *i, unsigned long id) { return id < i->cap ? i->slot[id] : 0; }
+void *idr_remove(struct idr *i, unsigned long id) { void *p = 0; if (id < i->cap) { p = i->slot[id]; i->slot[id] = 0; } return p; }
+int idr_for_each(const struct idr *i, int (*fn)(int, void *, void *), void *data) {
+  for (unsigned int n = 0; n < i->cap; n++) if (i->slot[n]) { int r = fn(n, i->slot[n], data); if (r) return r; }
+  return 0; }

@@ -219,4 +219,28 @@ void ida_free(struct ida *i, unsigned int id);
 struct sk_buff { u8 *data; u32 len; u32 truesize; u8 *head; u32 buflen; };
 
 
+
+#define U8_MAX 0xffu
+#define U16_MAX 0xffffu
+#define S16_MAX 0x7fff
+#define S32_MAX 0x7fffffff
+#define ETOOSMALL 525
+#define __cpu_to_le16(x) cpu_to_le16(x)
+#define __cpu_to_le32(x) cpu_to_le32(x)
+#define __cpu_to_le64(x) cpu_to_le64(x)
+#define __le16_to_cpu(x) le16_to_cpu(x)
+#define __le32_to_cpu(x) le32_to_cpu(x)
+#define __le64_to_cpu(x) le64_to_cpu(x)
+/* idr: ids index a growable pointer array */
+struct idr { void **slot; unsigned int cap; unsigned int next; };
+void idr_init(struct idr *i);
+void idr_destroy(struct idr *i);
+int idr_alloc(struct idr *i, void *p, int start, int end, gfp_t f);
+int idr_alloc_cyclic(struct idr *i, void *p, int start, int end, gfp_t f);
+void *idr_find(const struct idr *i, unsigned long id);
+void *idr_remove(struct idr *i, unsigned long id);
+int idr_for_each(const struct idr *i, int (*fn)(int id, void *p, void *data), void *data);
+#define DEFINE_IDR(n) struct idr n = { 0, 0, 0 }
+#define idr_preload(f)
+#define idr_preload_end()
 #endif
