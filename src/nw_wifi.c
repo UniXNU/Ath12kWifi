@@ -37,6 +37,24 @@ static void log_tap(int level, const char *line) {
          readl(m + 0x48), readl(m + 0x38), readl(m + bhi + 0x28), readl(m + bhi + 0x2c), readl(m + bhi + 0x30), readl(m + bhi + 0x34),
          readl(m + bhi + 0x38), readl(m + bhi + 0x3c)); }
 
+/* The address of a radio whose firmware reports none: the board's file wlan_mac.bin (text, the address as twelve hex digits after the
+ * last '='), else a locally administered address made up once. */
+static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+void nw_board_mac(u8 *a) {
+  static u8 made[6]; static int have;
+  const u8 *d; size_t n;
+  if (!have && lx_plat->fw_get && !lx_plat->fw_get("wlan_mac.bin", &d, &n)) {
+    size_t s = 0; for (size_t i = 0; i < n; i++) if (d[i] == '=') s = i + 1;
+    u8 m[6]; size_t k = 0;
+    for (size_t i = s; i < n && k < 12; i++) { int v = hexval((char)d[i]); if (v < 0) { if (k) break; continue; } m[k / 2] = (u8)(k & 1 ? m[k / 2] << 4 | v : v); k++; }
+    if (k == 12 && is_valid_ether_addr(m)) { memcpy(made, m, 6); have = 1; lx_log(6, "wifi: address from wlan_mac.bin"); }
+  }
+  if (!have) {
+    for (int i = 0; i < 6; i++) made[i] = (u8)(lx_random_u32() ^ lx_now_ms() >> (i * 3));
+    made[0] = (made[0] & 0xfe) | 0x02; have = 1; lx_log(4, "wifi: the firmware and the board give no address: a made-up one is used");
+  }
+  memcpy(a, made, 6); }
+
 void lx_irq_raise_all(void);
 static void irq_poll(void) { lx_irq_raise_all(); }
 int nw_wifi_start(const struct lx_platform *p, const struct nw_board *b) {

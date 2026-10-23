@@ -46,6 +46,20 @@ s = s.replace(old, '\tab->single_chip_mlo_support = true;\n', 1)
 if os.path.lexists(dst): os.remove(dst)
 open(dst, 'w').write(s)
 PY
+# The WCN7850 firmware of this board reports an all-zero address, and a scan interface made with it stops the firmware's replies: the copy
+# of mac.c asks the board (nw_board_mac) for the address of a radio whose address is not valid.
+python3 - "$A/mac.c" "$O/mac.c" <<'PY'
+import os, sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+old = '\t\t\tar->mac_addr[4] += ar->pdev_idx;\n\t\t}\n'
+assert s.count(old) == 1, "mac.c address mark"
+s = s.replace(old, old + '\t\tif (!is_valid_ether_addr(ar->mac_addr)) {\n\t\t\tnw_board_mac(ar->mac_addr);\n\t\t\tar->mac_addr[4] += ar->pdev_idx;\n\t\t}\n', 1)
+s = s.replace('#include "mac.h"\n', '#include "mac.h"\nvoid nw_board_mac(u8 *a);\n', 1)
+assert 'void nw_board_mac' in s, "mac.c include mark"
+if os.path.lexists(dst): os.remove(dst)
+open(dst, 'w').write(s)
+PY
 # The copy also shows the bytes of an event it does not know.
 python3 - "$O/wmi.c" <<'PY'
 import sys
