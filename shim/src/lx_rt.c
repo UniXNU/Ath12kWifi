@@ -62,6 +62,7 @@ int lx_request_irq(unsigned int irq, irq_handler_t h, irq_handler_t t, unsigned 
 void lx_free_irq(unsigned int irq, void *id) { for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].irq == irq && g_irq[i].id == id) g_irq[i].used = 0; }
 void lx_irq_raise(unsigned int irq) { for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].irq == irq) g_irq[i].pending = 1; }
 
+void lx_irq_raise_all(void);
 /* The dispatcher: interrupts first, then due timers, then one round of queued work. */
 int lx_pump(void) {
   int ran = 0;
@@ -69,6 +70,9 @@ int lx_pump(void) {
   { char here; if (!g_stack_top) g_stack_top = &here; unsigned long used = (unsigned long)(g_stack_top - &here); if (used > lx_stack_peak && used < (1UL << 24)) lx_stack_peak = used; if ((unsigned long)g_depth + 1 > lx_depth_peak) lx_depth_peak = g_depth + 1; }
   g_depth++;
   lx_plat->poll();
+  /* The endpoint's interrupts are writes into a sink nobody watches: every handler is offered a look about once a millisecond, in every wait as well
+   * as in the board's loop (a handler finds out from its own device registers whether there is anything to do). */
+  { static u64 last_raise; u64 t = lx_now_ms(); if (t != last_raise) { last_raise = t; lx_irq_raise_all(); } }
   for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].pending) {
     g_irq[i].pending = 0; ran = 1;
     irqreturn_t r = g_irq[i].h ? g_irq[i].h(g_irq[i].irq, g_irq[i].id) : IRQ_WAKE_THREAD;
@@ -186,4 +190,5 @@ int idr_for_each(const struct idr *i, int (*fn)(int, void *, void *), void *data
   return 0; }
 
 /* without interrupt delivery from the endpoint, every registered handler is given a turn each round; handlers check their own status */
+void lx_irq_raise_all(void);
 void lx_irq_raise_all(void) { for (int i = 0; i < 64; i++) if (g_irq[i].used) g_irq[i].pending = 1; }
