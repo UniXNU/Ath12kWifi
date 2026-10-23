@@ -30,4 +30,13 @@ grep -q 'DP_RXDMA_BUF_RING_SIZE.*512' $O/dp.h || { echo "dp.h patch missed" >&2;
 # Sending a command is the condition of the wait in ath12k_wmi_cmd_send: that wait must evaluate it once per round and never after it has succeeded.
 rm -f $O/wmi.c; sed '/^int ath12k_wmi_cmd_send(/,/^}/ s/wait_event_timeout(/wait_event_timeout_once(/' $A/wmi.c > $O/wmi.c
 grep -q 'wait_event_timeout_once' $O/wmi.c || { echo "wmi.c patch missed" >&2; exit 1; }
+# The copy also shows the bytes of an event it does not know.
+python3 - "$O/wmi.c" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+mark = '\t\tath12k_dbg(ab, ATH12K_DBG_WMI, "Unknown eventid: 0x%x\\n", id);\n'
+assert mark in s, "unknown event mark"
+s = s.replace(mark, mark + '\t\tath12k_dbg_dump(ab, ATH12K_DBG_WMI, NULL, "", skb->data, skb->len);\n', 1)
+open(p, 'w').write(s)
+PY
 ln -sf $L/drivers/bus/mhi/common.h out/common.h
