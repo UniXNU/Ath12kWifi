@@ -45,6 +45,7 @@
 #define ENOLINK 67
 #define EREMOTEIO 121
 #define ESRCH 3
+#define EDESTADDRREQ 89
 #define EAFNOSUPPORT 97
 #define EDOM 33
 #define EFBIG 27

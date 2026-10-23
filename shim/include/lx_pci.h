@@ -216,7 +216,6 @@ void *lx_ioremap(phys_addr_t pa, size_t n);
 #define ioremap_wc(pa, n) lx_ioremap(pa, n)
 #define memremap(pa, n, f) lx_ioremap(pa, n)
 #define memunmap(p) ((void)(p))
-#define kernel_connect(s, a, l, f) 0
 #define MEMREMAP_WC 0
 
 #define SET_LATE_SYSTEM_SLEEP_PM_OPS(a, b)

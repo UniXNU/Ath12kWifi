@@ -3,12 +3,16 @@
 #include <stdlib.h>
 #include "lx_plat.h"
 
+#ifndef LX_MAX_DEPTH
+#define LX_MAX_DEPTH 16
+#endif
 const struct lx_platform *lx_plat;
 static struct list_head g_work = LIST_HEAD_INIT(g_work);
 static struct list_head g_timers = LIST_HEAD_INIT(g_timers);   /* delayed_work entries ordered by insertion */
 static struct { int used; unsigned int irq; irq_handler_t h, t; void *id; int pending; } g_irq[64];
 static u32 g_seed = 0x2545f491u;
 static int g_depth;
+static char *g_stack_top; unsigned long lx_stack_peak, lx_depth_peak;
 
 u64 lx_now_ms(void) { return lx_plat->now_ms(); }
 void lx_delay_us(unsigned int us) { lx_delay_ms((us + 999) / 1000 ? (us + 999) / 1000 : 0); if (!us) return; }
@@ -57,7 +61,8 @@ void lx_irq_raise(unsigned int irq) { for (int i = 0; i < 64; i++) if (g_irq[i].
 /* The dispatcher: interrupts first, then due timers, then one round of queued work. */
 int lx_pump(void) {
   int ran = 0;
-  if (g_depth > 4) return 0;
+  if (g_depth > LX_MAX_DEPTH) return 0;
+  { char here; if (!g_stack_top) g_stack_top = &here; unsigned long used = (unsigned long)(g_stack_top - &here); if (used > lx_stack_peak && used < (1UL << 24)) lx_stack_peak = used; if ((unsigned long)g_depth + 1 > lx_depth_peak) lx_depth_peak = g_depth + 1; }
   g_depth++;
   lx_plat->poll();
   for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].pending) {
@@ -71,9 +76,9 @@ int lx_pump(void) {
     n = p->next; struct delayed_work *d = container_of(p, struct delayed_work, work.entry);
     if (d->armed && now >= d->due) { d->armed = 0; list_del_init(p); ran = 1; d->work.func(&d->work); }
   }
-  struct list_head batch; INIT_LIST_HEAD(&batch); list_splice_tail_init(&g_work, &batch);
-  while (!list_empty(&batch)) {
-    struct work_struct *w = list_first_entry(&batch, struct work_struct, entry);
+  /* one item at a time off the shared list, so a wait inside a work function still reaches work queued behind it */
+  for (int budget = 256; budget > 0 && !list_empty(&g_work); budget--) {
+    struct work_struct *w = list_first_entry(&g_work, struct work_struct, entry);
     list_del_init(&w->entry); w->queued = 0; ran = 1;
     if (w->func) w->func(w);
   }

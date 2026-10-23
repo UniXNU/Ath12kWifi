@@ -9,6 +9,7 @@ struct atomic_notifier_head lx_panic_list;
 static struct pci_driver *g_drv;
 static struct pci_dev g_dev;
 static struct msi_desc g_msi[32];
+static struct pci_bus g_bus = { 1 };
 
 int lx_pci_read_config(struct pci_dev *d, int off, int size, u32 *v) { (void)d; return nw_board->cfg_read(off, size, v); }
 int lx_pci_write_config(struct pci_dev *d, int off, int size, u32 v) { (void)d; return nw_board->cfg_write(off, size, v); }
@@ -52,7 +53,7 @@ int pci_register_driver(struct pci_driver *drv) {
   g_drv = drv;
   memset(&g_dev, 0, sizeof g_dev);
   g_dev.vendor = 0x17cb; g_dev.device = nw_board->device_id; g_dev.dev.name = "wlan0pci"; g_dev.dev.dma_mask = 0xffffffffull;
-  g_dev.msi_cap = nw_board->msi_cap;
+  g_dev.msi_cap = nw_board->msi_cap; g_dev.bus = &g_bus;
   for (const struct pci_device_id *id = drv->id_table; id && id->vendor; id++)
     if (id->device == g_dev.device) return drv->probe(&g_dev, id);
   return -ENODEV; }

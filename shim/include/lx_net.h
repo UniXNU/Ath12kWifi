@@ -16,12 +16,13 @@ struct net { int unused; };
 extern struct net init_net;
 struct sock {
   void *sk_user_data; void (*sk_data_ready)(struct sock *); void (*sk_error_report)(struct sock *);
-  struct list_head rx; u32 port; int reset;
+  struct list_head rx; u32 port; int reset; u32 peer_node, peer_port; int connected;
 };
 struct socket { struct sock *sk; };
 int sock_create_kern(struct net *net, int family, int type, int proto, struct socket **res);
 void sock_release(struct socket *s);
 int kernel_getsockname(struct socket *s, struct sockaddr *addr);
+int kernel_connect(struct socket *s, struct sockaddr *addr, int len, int flags);
 int kernel_bind(struct socket *s, struct sockaddr *addr, int len);
 int kernel_sendmsg(struct socket *s, struct msghdr *m, struct kvec *v, size_t n, size_t len);
 int kernel_recvmsg(struct socket *s, struct msghdr *m, struct kvec *v, size_t n, size_t len, int flags);

@@ -22,6 +22,7 @@ static struct sock *g_sock[MAX_SOCK];
 static struct srv g_srv[MAX_SRV];
 static struct lookup g_lookup[MAX_LOOKUP];
 static nw_qrtr_xmit_fn g_xmit; static void *g_ctx;
+static int g_hello_sent;
 static u32 g_remote;      /* node id the remote announced, 0 until the first packet */
 static u32 g_next_port = 0x4000;
 struct net init_net;
@@ -80,7 +81,8 @@ static void ns_handle(u32 src_node, u32 src_port, const struct qrtr_ctrl_pkt *p,
   if (len < sizeof *p) return;
   switch (le32_to_cpu(p->cmd)) {
   case QRTR_TYPE_HELLO:
-    if (src_node != LOCAL_NODE) send_remote(QRTR_TYPE_HELLO, LOCAL_NODE, QRTR_PORT_CTRL, src_node, QRTR_PORT_CTRL, &(struct qrtr_ctrl_pkt){ .cmd = cpu_to_le32(QRTR_TYPE_HELLO) }, sizeof(struct qrtr_ctrl_pkt), 0);
+    /* answered once per link: two name services that echo each other's hello would otherwise never stop */
+    if (src_node != LOCAL_NODE && !g_hello_sent) { g_hello_sent = 1; send_remote(QRTR_TYPE_HELLO, LOCAL_NODE, QRTR_PORT_CTRL, src_node, QRTR_PORT_CTRL, &(struct qrtr_ctrl_pkt){ .cmd = cpu_to_le32(QRTR_TYPE_HELLO) }, sizeof(struct qrtr_ctrl_pkt), 0); }
     break;
   case QRTR_TYPE_NEW_SERVER: ns_new_server(le32_to_cpu(p->server.service), le32_to_cpu(p->server.instance), le32_to_cpu(p->server.node), le32_to_cpu(p->server.port)); break;
   case QRTR_TYPE_DEL_SERVER: ns_del_server(le32_to_cpu(p->server.service), le32_to_cpu(p->server.instance), le32_to_cpu(p->server.node), le32_to_cpu(p->server.port)); break;
@@ -96,14 +98,14 @@ static void ns_handle(u32 src_node, u32 src_port, const struct qrtr_ctrl_pkt *p,
 }
 
 void nw_qrtr_set_endpoint(nw_qrtr_xmit_fn xmit, void *ctx) {
-  g_xmit = xmit; g_ctx = ctx;
+  g_xmit = xmit; g_ctx = ctx; g_hello_sent = xmit != 0;
   if (xmit) {   /* introduce ourselves to every node behind the endpoint */
     struct qrtr_ctrl_pkt hello = { .cmd = cpu_to_le32(QRTR_TYPE_HELLO) };
     send_remote(QRTR_TYPE_HELLO, LOCAL_NODE, QRTR_PORT_CTRL, QRTR_NODE_BCAST, QRTR_PORT_CTRL, &hello, sizeof hello, 0);
   }
 }
 void nw_qrtr_endpoint_down(void) {
-  g_xmit = 0;
+  g_xmit = 0; g_hello_sent = 0;
   for (int i = 0; i < MAX_SRV; i++) if (g_srv[i].used && g_srv[i].node != LOCAL_NODE) { u32 sv = g_srv[i].service, in = g_srv[i].instance, nd = g_srv[i].node, po = g_srv[i].port; ns_del_server(sv, in, nd, po); }
 }
 
@@ -132,7 +134,7 @@ void nw_qrtr_rx(const void *pkt, size_t len) {
     send_remote(QRTR_TYPE_RESUME_TX, dn, dp, sn, sp, &r, sizeof r, 0);
   }
   switch (type) {
-  case QRTR_TYPE_DATA: { struct sock *s = find_port(dp); if (s) deliver(s, sn, sp, pl, size); else lx_log(6, "qrtr: no port %x", dp); break; }
+  case QRTR_TYPE_DATA: { struct sock *s = find_port(dp); lx_log(7, "qrtr: data from %u:%x to port %x, %u bytes%s", sn, sp, dp, size, s ? "" : " (no socket)"); if (s) deliver(s, sn, sp, pl, size); else lx_log(6, "qrtr: no port %x", dp); break; }
   case QRTR_TYPE_RESUME_TX: case QRTR_TYPE_PING: case QRTR_TYPE_EXIT: break;
   default: ns_handle(sn, sp, (const struct qrtr_ctrl_pkt *)pl, size); break;
   }
@@ -155,9 +157,13 @@ struct qsa { __kernel_sa_family_t family; u32 node, port; };
 int kernel_getsockname(struct socket *so, struct sockaddr *addr) {
   struct qsa *a = (struct qsa *)addr; a->family = AF_QIPCRTR; a->node = LOCAL_NODE; a->port = so->sk->port; return 0; }
 int kernel_bind(struct socket *so, struct sockaddr *addr, int len) { (void)len; so->sk->port = ((struct qsa *)addr)->port; return 0; }
+int kernel_connect(struct socket *so, struct sockaddr *addr, int len, int flags) {
+  (void)len; (void)flags; struct qsa *a = (struct qsa *)addr; so->sk->peer_node = a->node; so->sk->peer_port = a->port; so->sk->connected = 1; return 0; }
 int kernel_sendmsg(struct socket *so, struct msghdr *m, struct kvec *v, size_t n, size_t len) {
-  if (n != 1 || !m->msg_name) return -EINVAL;
-  struct qsa *to = m->msg_name; u32 dn = to->node, dp = to->port;
+  if (n != 1) return -EINVAL;
+  struct qsa peer = { AF_QIPCRTR, so->sk->peer_node, so->sk->peer_port };
+  struct qsa *to = m->msg_name ? m->msg_name : &peer; if (!m->msg_name && !so->sk->connected) return -EDESTADDRREQ;
+  u32 dn = to->node, dp = to->port;
   const void *p = v->iov_base;
   if (dn == LOCAL_NODE || (dn == QRTR_NODE_BCAST && dp == QRTR_PORT_CTRL && 0)) {
     if (dp == QRTR_PORT_CTRL) { ns_handle(LOCAL_NODE, so->sk->port, p, len); return (int)len; }
