@@ -111,6 +111,8 @@ static void rx_work(struct work_struct *w) {
     if (g_hooks.rx) g_hooks.rx(g_hw, skb);
     if (n) lx_log(6, "wifi: frame %d handled", n);
     kfree_skb(skb); } }
+unsigned nw_rx_backlog(void) { return g_rx_init ? skb_queue_len(&g_rxq) : 0; }
+unsigned nw_rx_dropped(void) { return g_rx_dropped; }
 static void rx_defer(struct sk_buff *skb) {
   if (!g_rx_init) { skb_queue_head_init(&g_rxq); INIT_WORK(&g_rx_work, rx_work); g_rx_init = 1; }
   if (skb) { if (skb_queue_len(&g_rxq) >= RXQ_MAX) { if (!(g_rx_dropped++ & 255)) lx_log(4, "wifi: receive queue full, %u frames dropped", g_rx_dropped); kfree_skb(skb); return; }

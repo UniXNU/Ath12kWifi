@@ -11,6 +11,7 @@ struct nw_wifi_hooks {
 void nw_wifi_set_hooks(const struct nw_wifi_hooks *h);
 struct ieee80211_hw *nw_wifi_hw(void);
 struct ieee80211_channel; void nw_wifi_bss_set(const u8 *bssid, struct ieee80211_channel *ch, const u8 *ie, unsigned len);   /* the network joined (0: none) */
+unsigned nw_rx_backlog(void); unsigned nw_rx_dropped(void);   /* received frames waiting for the station code; dropped because that queue was full */
 extern unsigned nw_eapol_tx[3];   /* sent handshake frames: acknowledged, not acknowledged, dropped by the driver */
 const struct ieee80211_ops *nw_wifi_ops(void);
 void nw_wifi_vif_add(struct ieee80211_vif *v);

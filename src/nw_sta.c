@@ -13,6 +13,8 @@
 #define IE_MAX 384
 #define EAPOL_RETRY_MS 1500
 #define STEP_TIMEOUT_MS 300
+/* No regulatory domain is applied, so a channel keeps the driver's 30 dBm default; a client stays at the usual 20 dBm (within every region's limit). */
+#define STA_TXPOWER_DBM 20
 
 static u8 OUI_RSN[3] = { 0x00, 0x0f, 0xac };
 
@@ -42,7 +44,7 @@ static struct {
   struct ieee80211_key_conf *ptk_key, *gtk_key; u16 seq; u8 gtk_id;
   u64 started; u64 last_tx; int tries; int rsn_ok; u16 aid;
   /* message 4 waits for its acknowledgement before the keys go in: the access point may repeat message 3 in the clear meanwhile */
-  u8 gtk[32]; int gtk_len, gtk_idx; int m4_done; u64 m4_at;
+  u8 gtk[32]; int gtk_len, gtk_idx; int m4_done; u64 m4_at; u64 hb_at; unsigned hb_frames, hb_beacons, hb_quiet;
 } C;
 static struct delayed_work g_timer; static struct delayed_work g_scan_timer;
 static int g_scan_running; static int g_connect_waits; static int g_scan_directed; static u8 g_scan_ssid[32]; static u8 g_scan_ssid_len;
@@ -158,7 +160,7 @@ static int bring_up_channel(void) {
   int r = g_ops->add_chanctx(g_hw, ctx); if (r) { lx_free(ctx); return r; }
   C.ctx = ctx; rcu_assign_pointer(g_vif->bss_conf.chanctx_conf, ctx); nw_wifi_chanctx_set(ctx);
   g_vif->bss_conf.bssid = C.ap.bssid; memcpy(g_vif->cfg.ap_addr, C.ap.bssid, 6);
-  g_vif->bss_conf.chanreq.oper = ctx->def; g_vif->bss_conf.txpower = ch->max_power; g_vif->bss_conf.txpower_type = NL80211_TX_POWER_AUTOMATIC; g_vif->bss_conf.beacon_int = C.ap.interval ? C.ap.interval : 100; g_vif->bss_conf.dtim_period = 1;
+  g_vif->bss_conf.chanreq.oper = ctx->def; g_vif->bss_conf.txpower = min_t(int, ch->max_power, STA_TXPOWER_DBM); g_vif->bss_conf.txpower_type = NL80211_TX_POWER_AUTOMATIC; g_vif->bss_conf.beacon_int = C.ap.interval ? C.ap.interval : 100; g_vif->bss_conf.dtim_period = 1;
   g_vif->cfg.ssid_len = C.ssid_len; memcpy(g_vif->cfg.ssid, C.ssid, C.ssid_len);
   C.chanctx_up = 1;
   return 0; }
@@ -230,7 +232,7 @@ static void send_eapol(const struct eapol_key *k, unsigned total) {
   static const u8 snap[8] = { 0xaa, 0xaa, 3, 0, 0, 0, 0x88, 0x8e }; skb_put_data(skb, snap, 8); skb_put_data(skb, k, total);
   skb->protocol = cpu_to_be16(ETH_P_PAE);   /* the driver sends the handshake as an 802.11 frame on an Ethernet interface */
   tx_frame(skb); }
-void nw_wifi_htt_stats(int type);
+void nw_wifi_htt_stats(int type); void nw_wifi_rx_state(char *b, int n); void nw_wifi_ring_state(char *b, int n);
 static void sign(struct eapol_key *k, unsigned total) {
   u8 h[20]; memset(k->mic, 0, 16); nw_hmac_sha1(C.ptk, 16, (const u8 *)k, total, h); memcpy(k->mic, h, 16); }
 static int install_key(int pairwise, int idx, const u8 *key, int len) {
@@ -254,7 +256,22 @@ void nw_sta_eapol_status(bool acked) {
   lx_log(6, "wifi: handshake message 4 %s", acked ? "acknowledged" : "not acknowledged"); if (C.hs_stage == 3) C.m4_done = 1; }
 static void finish_authorized(void) {
   if (set_sta_state(IEEE80211_STA_AUTHORIZED)) { connect_done(NW_RES_FAILED); return; }
-  C.state = NW_STA_UP; nw_wifi_stats.stage = 8; lx_log(6, "wifi: connected"); connect_done(NW_RES_OK); }
+  C.state = NW_STA_UP; nw_wifi_stats.stage = 8; C.hb_at = lx_now_ms(); C.hb_frames = nw_wifi_stats.frames; C.hb_beacons = nw_wifi_stats.beacons; C.hb_quiet = 0;
+  lx_log(6, "wifi: connected"); connect_done(NW_RES_OK); }
+/* Once a second while connected: what arrived. A second with nothing at all is logged with the receive rings and the transmit outcomes, and the
+ * firmware is asked for its ring and receive statistics once per quiet spell; every tenth second the same line is logged anyway. */
+static void heartbeat(u64 now) {
+  if (now - C.hb_at < 1000) return;
+  unsigned f = nw_wifi_stats.frames - C.hb_frames, bc = nw_wifi_stats.beacons - C.hb_beacons; static unsigned n;
+  C.hb_at = now; C.hb_frames = nw_wifi_stats.frames; C.hb_beacons = nw_wifi_stats.beacons; n++;
+  if (f || bc) { if (C.hb_quiet) lx_log(6, "wifi: frames arrive again after %u quiet seconds", C.hb_quiet); C.hb_quiet = 0; if (n % 10) return; nw_wifi_htt_stats(37); }
+  else C.hb_quiet++;
+  char rx[200]; nw_wifi_rx_state(rx, sizeof rx); const char *semi = strchr(rx, ';');
+  lx_log(6, "wifi: last second %u frames %u beacons, quiet %u; rx %.*s", f, bc, C.hb_quiet, semi ? (int)(semi - rx) : (int)strlen(rx), rx);
+  if (semi) lx_log(6, "wifi: rx rings%s", semi + 1);
+  lx_log(6, "wifi: tx %s", tx_reasons());
+  nw_wifi_ring_state(rx, sizeof rx); semi = strchr(rx, ';'); lx_log(6, "wifi: rings %.*s", semi ? (int)(semi - rx) : (int)strlen(rx), rx); if (semi) lx_log(6, "wifi: rings%s", semi + 1);
+  if (C.hb_quiet == 1) { nw_wifi_htt_stats(37); nw_wifi_htt_stats(5); nw_wifi_htt_stats(45); } }
 static void handle_eapol(const u8 *p, unsigned len) {
   const struct eapol_key *k = (const void *)p;
   if (len < sizeof *k || k->type != 3 || (k->desc != 2 && k->desc != 254)) return;
@@ -374,6 +391,7 @@ static void timer_fn(struct work_struct *w) {
              nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2], tx_reasons());
       nw_wifi_htt_stats(8); install_keys(); break; }
     if (C.state == NW_STA_KEYS && now - C.started >= 8000) { lx_log(4, "wifi: key handshake timed out at stage %d (tx acked %u, not acked %u, dropped %u)", C.hs_stage, nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2]); connect_done(C.hs_stage ? NW_RES_BAD_KEY : NW_RES_TIMEOUT); return; } break;
+  case NW_STA_UP: heartbeat(now); break;
   default: return; }
   lx_queue_delayed(&g_timer, 100); }
 
@@ -439,6 +457,8 @@ void nw_sta_run(void) {
 void nw_sta_link_lost(void) { if (C.state >= NW_STA_AUTH) teardown(1, 0); }
 void nw_sta_ready(struct ieee80211_hw *hw) {
   int r; g_hw = hw; g_ops = nw_wifi_ops(); nw_wifi_stats.stage = 3;
+  for (int b = 0; b < NUM_NL80211_BANDS; b++) if (hw->wiphy->bands[b]) for (int i = 0; i < hw->wiphy->bands[b]->n_channels; i++) {   /* vdev start passes these on */
+    struct ieee80211_channel *c = &hw->wiphy->bands[b]->channels[i]; if (c->max_power > STA_TXPOWER_DBM) c->max_power = STA_TXPOWER_DBM; if (c->max_reg_power > STA_TXPOWER_DBM) c->max_reg_power = STA_TXPOWER_DBM; }
   r = g_ops->start(hw); if (r) { lx_log(3, "wifi: start failed: %d", r); nw_wifi_stats.last_err = r; return; }
   g_vif = lx_alloc(sizeof *g_vif + hw->vif_data_size + 64, 1); if (!g_vif) return;
   g_vif->type = NL80211_IFTYPE_STATION; g_vif->bss_conf.vif = g_vif; g_vif->bss_conf.link_id = 0; g_vif->link_conf[0] = &g_vif->bss_conf;
