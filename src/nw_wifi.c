@@ -204,5 +204,10 @@ int nw_wifi_start(const struct lx_platform *p, const struct nw_board *b) {
   r = ath12k_wifi7_pci_init();
   if (r) { nw_wifi_stats.last_err = r; lx_log(3, "wifi: driver start failed: %d", r); return r; }
   nw_wifi_stats.stage = 2; return 0; }
-int nw_wifi_step(void) { irq_poll(); int r = lx_pump(); nw_sta_run(); wmi_stuck(); return r; }
+/* Returns nonzero while traffic moves (frames arrived or frames wait to be sent): the board then calls again at once instead of sleeping.
+ * lx_pump's own result is no guide, every handler is offered a look on each call. */
+int nw_wifi_step(void) {
+  static unsigned last_frames; irq_poll(); lx_pump(); nw_sta_run(); wmi_stuck();
+  const unsigned f = nw_wifi_stats.frames; const int moved = f != last_frames; last_frames = f;
+  return moved || nw_sta_tx_pending(); }
 void nw_wifi_stop(void) { ath12k_wifi7_pci_exit(); }
