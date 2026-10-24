@@ -115,6 +115,24 @@ void nw_wifi_tx_reasons(char *b, int n) {
   o += snprintf(b + o, n - o, "src"); for (int i = 0; i < HAL_WBM_REL_SRC_MODULE_MAX && o < n; i++) o += snprintf(b + o, n - o, " %u", st->tx_wbm_rel_source[i]);
   if (o < n) o += snprintf(b + o, n - o, " fw"); for (int i = 0; i < MAX_FW_TX_STATUS && o < n; i++) o += snprintf(b + o, n - o, " %u", st->fw_tx_status[i]);
   if (o < n) o += snprintf(b + o, n - o, " tqm"); for (int i = 0; i < MAX_TQM_RELEASE_REASON && o < n; i++) o += snprintf(b + o, n - o, " %u", st->tqm_rel_reason[i]); }
+/* The firmware's own transmit statistics (HTT extended stats): asked for on demand, every block of the answer is logged with its non-zero words. */
+void nw_wifi_htt_stats(int type) {
+  if (!g_hw) return;
+  struct ath12k *ar = ath12k_ah_to_ar(g_hw->priv, 0); struct htt_ext_stats_cfg_params cfg = {};
+  int r = ath12k_dp_tx_htt_h2t_ext_stats_req(ar, type, &cfg, (u64)ATH12K_HTT_STATS_MAGIC_VALUE << 32);
+  lx_log(6, "wifi: firmware statistics %d requested: %d", type, r); }
+void nw_htt_ext_stats(struct ath12k_base *ab, struct sk_buff *skb) {
+  (void)ab; const struct ath12k_htt_extd_stats_msg *m = (const void *)skb->data;
+  if (skb->len < sizeof *m) return;
+  u32 len = u32_get_bits(le32_to_cpu(m->info1), ATH12K_HTT_T2H_EXT_STATS_INFO1_LENGTH);
+  if (len > skb->len - sizeof *m) len = skb->len - sizeof *m;
+  const u8 *p = m->data, *end = m->data + len;
+  while (p + 4 <= end) {
+    u32 h = get_unaligned_le32(p); u16 tag = h & 0xfff, tl = (h >> 12) & 0xfff; p += 4; if (p + tl > end) break;
+    char b[240]; int o = snprintf(b, sizeof b, "wifi: firmware stats tag %u:", tag), any = 0;
+    for (unsigned i = 0; i + 4 <= tl && o < (int)sizeof b - 12; i += 4) { u32 v = get_unaligned_le32(p + i); if (v) { o += snprintf(b + o, sizeof b - o, " %u=%u", i / 4, v); any = 1; } }
+    if (any) lx_log(6, "%s", b);
+    p += tl; } }
 static void log_tap(int level, const char *line) {
   static int done; (void)level;
   if (!g_wmi_stuck && has_text(line, "wmi command") && has_text(line, "timeout")) g_wmi_stuck = 1;

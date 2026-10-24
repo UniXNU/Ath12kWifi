@@ -125,4 +125,7 @@ assert mark in s, "unknown event mark"
 s = s.replace(mark, mark + '\t\tath12k_dbg_dump(ab, ATH12K_DBG_WMI, NULL, "", skb->data, skb->len);\n', 1)
 open(p, 'w').write(s)
 PY
+# Without debugfs the firmware's extended statistics are thrown away: the copy of dp_htt.c hands them to nw_htt_ext_stats, which logs them.
+rm -f $O/dp_htt.c; sed 's/^\t\tath12k_debugfs_htt_ext_stats_handler(ab, skb);/\t\t{ extern void nw_htt_ext_stats(struct ath12k_base *, struct sk_buff *); nw_htt_ext_stats(ab, skb); }/' $A/dp_htt.c > $O/dp_htt.c
+grep -q 'nw_htt_ext_stats' $O/dp_htt.c || { echo "dp_htt.c patch missed" >&2; exit 1; }
 ln -sf $L/drivers/bus/mhi/common.h out/common.h
