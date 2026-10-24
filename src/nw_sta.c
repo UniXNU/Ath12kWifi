@@ -42,7 +42,7 @@ static struct {
   struct ieee80211_key_conf *ptk_key, *gtk_key; u16 seq; u8 gtk_id;
   u64 started; u64 last_tx; int tries; int rsn_ok; u16 aid;
   /* message 4 waits for its acknowledgement before the keys go in: the access point may repeat message 3 in the clear meanwhile */
-  u8 gtk[32]; int gtk_len, gtk_idx; int m4_done; u64 m4_at; u64 hb_at; unsigned hb_frames, hb_beacons, hb_quiet;
+  u8 gtk[32]; int gtk_len, gtk_idx; int m4_done; u64 m4_at; u64 hb_at; unsigned hb_frames, hb_beacons, hb_quiet; u64 bmiss_at; unsigned bmiss_frames;
 } C;
 static struct delayed_work g_timer; static struct delayed_work g_scan_timer;
 static int g_scan_running; static int g_connect_waits; static int g_scan_directed; static u8 g_scan_ssid[32]; static u8 g_scan_ssid_len;
@@ -50,6 +50,7 @@ static int g_scan_running; static int g_connect_waits; static int g_scan_directe
 static void tx_frame(struct sk_buff *skb);
 static void connect_done(int res);
 static void teardown(int notify_lost, int reason);
+static void beacon_miss_check(u64 now);
 
 /* ---- scan list ---- */
 static void note_bss(struct sk_buff *skb) {
@@ -85,7 +86,8 @@ static void do_scan(const u8 *ssid, u8 len) {
   struct ieee80211_scan_request *rq = lx_alloc(sizeof *rq + sizeof(struct ieee80211_channel *) * n + 2 * sizeof(struct cfg80211_ssid), 1); if (!rq) return;
   struct cfg80211_ssid *ss = (struct cfg80211_ssid *)((u8 *)rq + sizeof *rq + sizeof(struct ieee80211_channel *) * n);
   int k = 0;
-  for (int b = 0; b < NUM_NL80211_BANDS; b++) { struct ieee80211_supported_band *sb = g_hw->wiphy->bands[b]; if (!sb) continue;
+  /* 6 GHz is left out: the system is never offered its channels, and its 59 passive channels were most of an 11 s scan */
+  for (int b = 0; b < NUM_NL80211_BANDS; b++) { struct ieee80211_supported_band *sb = g_hw->wiphy->bands[b]; if (!sb || b == NL80211_BAND_6GHZ) continue;
     for (int i = 0; i < sb->n_channels; i++) if (!(sb->channels[i].flags & IEEE80211_CHAN_DISABLED)) rq->req.channels[k++] = &sb->channels[i]; }
   rq->req.n_channels = k; rq->req.wiphy = g_hw->wiphy; rq->req.flags = 0;
   rq->req.n_ssids = 0; ss[rq->req.n_ssids].ssid_len = 0; rq->req.n_ssids++;      /* the wildcard: every network answers */
@@ -254,7 +256,7 @@ void nw_sta_eapol_status(bool acked) {
   lx_log(6, "wifi: handshake message 4 %s", acked ? "acknowledged" : "not acknowledged"); if (C.hs_stage == 3) C.m4_done = 1; }
 static void finish_authorized(void) {
   if (set_sta_state(IEEE80211_STA_AUTHORIZED)) { connect_done(NW_RES_FAILED); return; }
-  C.state = NW_STA_UP; nw_wifi_stats.stage = 8; C.hb_at = lx_now_ms(); C.hb_frames = nw_wifi_stats.frames; C.hb_beacons = nw_wifi_stats.beacons; C.hb_quiet = 0;
+  C.state = NW_STA_UP; C.bmiss_at = 0; nw_wifi_stats.stage = 8; C.hb_at = lx_now_ms(); C.hb_frames = nw_wifi_stats.frames; C.hb_beacons = nw_wifi_stats.beacons; C.hb_quiet = 0;
   lx_log(6, "wifi: connected"); connect_done(NW_RES_OK); }
 /* Once a second while connected: what arrived. A second with nothing at all is logged with the receive rings and the transmit outcomes, and the
  * firmware is asked for its ring and receive statistics once per quiet spell; every tenth second the same line is logged anyway. */
@@ -269,7 +271,7 @@ static void heartbeat(u64 now) {
   if (semi) lx_log(6, "wifi: rx rings%s", semi + 1);
   lx_log(6, "wifi: tx %s", tx_reasons());
   nw_wifi_ring_state(rx, sizeof rx); semi = strchr(rx, ';'); lx_log(6, "wifi: rings %.*s", semi ? (int)(semi - rx) : (int)strlen(rx), rx); if (semi) lx_log(6, "wifi: rings%s", semi + 1);
-  if (C.hb_quiet == 1) { nw_wifi_htt_stats(37); nw_wifi_htt_stats(5); nw_wifi_htt_stats(45); } }
+  if (C.hb_quiet == 1) { nw_wifi_htt_stats(37); nw_wifi_htt_stats(5); nw_wifi_htt_stats(45); nw_wifi_htt_stats(15); } }
 static void handle_eapol(const u8 *p, unsigned len) {
   const struct eapol_key *k = (const void *)p;
   if (len < sizeof *k || k->type != 3 || (k->desc != 2 && k->desc != 254)) return;
@@ -389,7 +391,7 @@ static void timer_fn(struct work_struct *w) {
              nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2], tx_reasons());
       nw_wifi_htt_stats(8); install_keys(); break; }
     if (C.state == NW_STA_KEYS && now - C.started >= 8000) { lx_log(4, "wifi: key handshake timed out at stage %d (tx acked %u, not acked %u, dropped %u)", C.hs_stage, nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2]); connect_done(C.hs_stage ? NW_RES_BAD_KEY : NW_RES_TIMEOUT); return; } break;
-  case NW_STA_UP: heartbeat(now); break;
+  case NW_STA_UP: heartbeat(now); beacon_miss_check(now); break;
   default: return; }
   lx_queue_delayed(&g_timer, 100); }
 
@@ -452,7 +454,15 @@ void nw_sta_run(void) {
     if (g_connect_waits && !g_scan_running) { g_connect_waits = 0; start_connect(); }
     else if (kind == REQ_DISCONNECT && C.state >= NW_STA_AUTH) { teardown(0, 0); C.state = NW_STA_IDLE; }
     if (C.state == NW_STA_UP || C.state >= NW_STA_AUTH) send_queued(); } }
-void nw_sta_link_lost(void) { if (C.state >= NW_STA_AUTH) teardown(1, 0); }
+/* The firmware's beacon miss while connected is held for 5 s, the way the wireless stack probes the access point first: frames that still arrive
+ * in that time keep the connection (a few missed beacons on a busy channel). */
+void nw_sta_link_lost(void) {
+  if (C.state == NW_STA_UP) { if (!C.bmiss_at) { C.bmiss_at = lx_now_ms(); C.bmiss_frames = nw_wifi_stats.frames; lx_log(6, "wifi: beacon miss reported, waiting 5 s for frames"); } return; }
+  if (C.state >= NW_STA_AUTH) teardown(1, 0); }
+static void beacon_miss_check(u64 now) {
+  if (!C.bmiss_at) return;
+  if (nw_wifi_stats.frames - C.bmiss_frames >= 2) { lx_log(6, "wifi: beacon miss, but %u frames arrived: staying", nw_wifi_stats.frames - C.bmiss_frames); C.bmiss_at = 0; return; }
+  if (now - C.bmiss_at >= 5000) { lx_log(4, "wifi: beacon miss and nothing received for 5 s: link lost"); C.bmiss_at = 0; teardown(1, 0); } }
 void nw_sta_ready(struct ieee80211_hw *hw) {
   int r; g_hw = hw; g_ops = nw_wifi_ops(); nw_wifi_stats.stage = 3;
   r = g_ops->start(hw); if (r) { lx_log(3, "wifi: start failed: %d", r); nw_wifi_stats.last_err = r; return; }
