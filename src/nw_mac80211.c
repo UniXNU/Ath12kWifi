@@ -98,13 +98,26 @@ const struct element *ieee80211_bss_get_elem(struct cfg80211_bss *bss, u8 id) {
 bool cfg80211_chandef_dfs_usable(struct wiphy *w, const struct cfg80211_chan_def *c) { (void)w; (void)c; return false; }
 unsigned int cfg80211_chandef_dfs_cac_time(struct wiphy *w, const struct cfg80211_chan_def *c) { (void)w; (void)c; return 0; }
 
-/* receive and scan completion go to the station code */
+/* Received frames and a lost link go to the station code from a work item of its own, the way mac80211 handles them in its interface work: the
+ * station code sends commands and waits for their answers, which come through the same copy engine whose service delivered the frame. */
+#define RXQ_MAX 512
+static struct sk_buff_head g_rxq; static struct work_struct g_rx_work; static int g_rx_init, g_lost; static unsigned g_rx_dropped;
+static void rx_work(struct work_struct *w) {
+  static int seen; struct sk_buff *skb; (void)w;
+  if (g_lost) { g_lost = 0; if (g_hooks.beacon_loss) g_hooks.beacon_loss(); }
+  while ((skb = skb_dequeue(&g_rxq))) {
+    int n = seen < 12 ? ++seen : 0;
+    if (n) lx_log(6, "wifi: frame %d to the station code, %u bytes", n, skb->len);
+    if (g_hooks.rx) g_hooks.rx(g_hw, skb);
+    if (n) lx_log(6, "wifi: frame %d handled", n);
+    kfree_skb(skb); } }
+static void rx_defer(struct sk_buff *skb) {
+  if (!g_rx_init) { skb_queue_head_init(&g_rxq); INIT_WORK(&g_rx_work, rx_work); g_rx_init = 1; }
+  if (skb) { if (skb_queue_len(&g_rxq) >= RXQ_MAX) { if (!(g_rx_dropped++ & 255)) lx_log(4, "wifi: receive queue full, %u frames dropped", g_rx_dropped); kfree_skb(skb); return; }
+             skb_queue_tail(&g_rxq, skb); }
+  queue_work(system_wq, &g_rx_work); }
 void ieee80211_rx_napi(struct ieee80211_hw *hw, struct ieee80211_sta *sta, struct sk_buff *skb, struct napi_struct *napi) {
-  static int seen; int n = seen < 12 ? ++seen : 0; (void)napi; (void)sta;
-  if (n) lx_log(6, "wifi: frame %d to the station code, %u bytes", n, skb->len);
-  if (g_hooks.rx) g_hooks.rx(hw, skb);
-  if (n) lx_log(6, "wifi: frame %d handled", n);
-  kfree_skb(skb); }
+  (void)hw; (void)napi; (void)sta; rx_defer(skb); }
 void ieee80211_scan_completed(struct ieee80211_hw *hw, struct cfg80211_scan_info *info) { if (g_hooks.scan_done) g_hooks.scan_done(hw, info ? info->aborted : 0); }
 void ieee80211_ready_on_channel(struct ieee80211_hw *hw) { (void)hw; }
 void ieee80211_remain_on_channel_expired(struct ieee80211_hw *hw) { (void)hw; }
@@ -125,8 +138,8 @@ void ieee80211_handle_wake_tx_queue(struct ieee80211_hw *hw, struct ieee80211_tx
 void ieee80211_report_low_ack(struct ieee80211_sta *sta, u32 n) { (void)sta; (void)n; }
 
 /* events that only matter once a connection is managed */
-void ieee80211_beacon_loss(struct ieee80211_vif *v) { (void)v; if (g_hooks.beacon_loss) g_hooks.beacon_loss(); }
-void ieee80211_connection_loss(struct ieee80211_vif *v) { (void)v; if (g_hooks.beacon_loss) g_hooks.beacon_loss(); }
+void ieee80211_beacon_loss(struct ieee80211_vif *v) { (void)v; g_lost = 1; rx_defer(0); }
+void ieee80211_connection_loss(struct ieee80211_vif *v) { (void)v; g_lost = 1; rx_defer(0); }
 void ieee80211_gtk_rekey_notify(struct ieee80211_vif *v, const u8 *bssid, const u8 *replay, gfp_t f) { (void)v; (void)bssid; (void)replay; (void)f; }
 void ieee80211_hw_restart_disconnect(struct ieee80211_vif *v) { (void)v; }
 void ieee80211_restart_hw(struct ieee80211_hw *hw) { (void)hw; lx_log(4, "wifi: firmware restart requested"); }
