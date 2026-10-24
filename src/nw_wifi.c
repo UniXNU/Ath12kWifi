@@ -120,15 +120,16 @@ static int ring_count(struct ath12k_base *ab, struct dp_srng *r, int dst) {
   if (!r->vaddr) return -1;
   struct hal_srng *s = &ab->hal.srng_list[r->ring_id]; spin_lock_bh(&s->lock);
   int n = dst ? ath12k_hal_srng_dst_num_free(ab, s, true) : ath12k_hal_srng_src_num_free(ab, s, true); spin_unlock_bh(&s->lock); return n; }
-/* Every other ring the host empties (exception, release, status, receive DMA errors, transmit completions) and the buffer rings it fills. */
+/* Every other ring the host empties (exception, release, status, receive DMA errors, transmit completions) and the buffer rings it fills, with
+ * the idle link descriptor ring the hardware takes a descriptor from for each received MPDU. */
 void nw_wifi_ring_state(char *b, int n) {
   b[0] = 0; if (!g_hw) return;
   struct ath12k *ar = ath12k_ah_to_ar(g_hw->priv, 0); struct ath12k_base *ab = ar->ab; struct ath12k_dp *dp = ath12k_ab_to_dp(ab);
-  snprintf(b, n, "exc %d rel %d st %d dmaerr %d/%d txc %d/%d/%d; free mon %d mac %d/%d; relsrc %u %u %u %u",
+  snprintf(b, n, "exc %d rel %d st %d dmaerr %d/%d txc %d/%d/%d; free mon %d mac %d/%d idle %d; relsrc %u %u %u %u",
            ring_count(ab, &dp->reo_except_ring, 1), ring_count(ab, &dp->rx_rel_ring, 1), ring_count(ab, &dp->reo_status_ring, 1),
            ring_count(ab, &dp->rxdma_err_dst_ring[0], 1), ring_count(ab, &dp->rxdma_err_dst_ring[1], 1),
            ring_count(ab, &dp->tx_ring[0].tcl_comp_ring, 1), ring_count(ab, &dp->tx_ring[1].tcl_comp_ring, 1), ring_count(ab, &dp->tx_ring[2].tcl_comp_ring, 1),
-           ring_count(ab, &dp->rx_mon_status_refill_ring[0].refill_buf_ring, 0), ring_count(ab, &dp->rx_mac_buf_ring[0], 0), ring_count(ab, &dp->rx_mac_buf_ring[1], 0),
+           ring_count(ab, &dp->rx_mon_status_refill_ring[0].refill_buf_ring, 0), ring_count(ab, &dp->rx_mac_buf_ring[0], 0), ring_count(ab, &dp->rx_mac_buf_ring[1], 0), ring_count(ab, &dp->wbm_idle_ring, 0),
            dp->device_stats.rx_wbm_rel_source[0][0], dp->device_stats.rx_wbm_rel_source[1][0], dp->device_stats.rx_wbm_rel_source[2][0], dp->device_stats.rx_wbm_rel_source[3][0]); }
 /* The receive side as the host sees it: frames taken from each destination ring, error counts, free entries of the refill ring, entries waiting in
  * each destination ring, and the frames queued for the station code. */
@@ -137,7 +138,7 @@ void nw_wifi_rx_state(char *b, int n) {
   struct ath12k *ar = ath12k_ah_to_ar(g_hw->priv, 0); struct ath12k_base *ab = ar->ab; struct ath12k_dp *dp = ath12k_ab_to_dp(ab);
   struct ath12k_device_dp_stats *st = &dp->device_stats; int o = 0;
   o += snprintf(b + o, n - o, "reo"); for (int i = 0; i < 4 && o < n; i++) o += snprintf(b + o, n - o, " %u", st->reo_rx[i][0]);
-  if (o < n) o += snprintf(b + o, n - o, " err %u", st->err_ring_pkts);
+  if (o < n) o += snprintf(b + o, n - o, " err %u push", st->err_ring_pkts); for (int i = 0; i < 4 && o < n; i++) o += snprintf(b + o, n - o, " %u", st->hal_reo_error[i]);
   for (int i = 0; i < HAL_REO_ENTR_RING_RXDMA_ECODE_MAX && o < n; i++) if (st->rxdma_error[i]) o += snprintf(b + o, n - o, " dma%d=%u", i, st->rxdma_error[i]);
   for (int i = 0; i < HAL_REO_DEST_RING_ERROR_CODE_MAX && o < n; i++) if (st->reo_error[i]) o += snprintf(b + o, n - o, " reo%d=%u", i, st->reo_error[i]);
   { struct hal_srng *s = &ab->hal.srng_list[dp->rx_refill_buf_ring.refill_buf_ring.ring_id]; spin_lock_bh(&s->lock);
