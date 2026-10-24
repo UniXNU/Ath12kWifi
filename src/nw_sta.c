@@ -136,6 +136,82 @@ static void send_auth(void) {
   tx_frame(skb); }
 static int rates_2g[] = { 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c };
 static int rates_5g[] = { 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c };
+
+/* ---- HT and VHT capability ---- */
+/* Without these elements in the association request the access point answers with 802.11g rates only (MCS is never negotiated), which
+ * caps the link near a legacy 54 Mbit/s. The capability is the band's own, so the request states exactly what the radio can do; the
+ * station entry gets the same capability, because the driver picks the peer's phymode from it (ath12k_mac_peer_assoc_h_ht / _vht read
+ * link_sta->ht_cap.ht_supported and link_sta->bandwidth, and fall back to MODE_11G when neither is set). */
+static u8 g_ht_ie[2 + sizeof(struct ieee80211_ht_cap)];
+static u8 g_vht_ie[2 + sizeof(struct ieee80211_vht_cap)];
+static unsigned g_ht_ie_len, g_vht_ie_len;
+static enum nl80211_band g_cap_band;
+static bool g_ht_on, g_vht_on;
+
+/* freq from a channel number: 2.4 GHz starts at 2407 (channel 14 is 2484), 5 GHz at 5000, 6 GHz at 5950. */
+static u32 freq_of_index(u8 idx, u32 primary_mhz) {
+  if (idx <= 14) return idx == 14 ? 2484 : 2407 + 5u * idx;
+  return (primary_mhz >= 5925 ? 5950u : 5000u) + 5u * idx; }
+/* The width the access point announces in its own beacons: HT Operation says whether 40 MHz is in use and on which side, VHT Operation
+ * raises a 5 GHz link to 80 MHz. The request, the station entry and the channel context all state this one width — announcing more than
+ * the access point runs gets the association refused, announcing less pins the firmware to a quarter of the usable rate. */
+static enum nl80211_chan_width g_width;
+static u32 g_center_freq1;
+static enum nl80211_chan_width ap_width(void) {
+  const u8 *ht = find_ie(C.ap.ie, C.ap.ie_len, WLAN_EID_HT_OPERATION);
+  const u8 *vht = find_ie(C.ap.ie, C.ap.ie_len, WLAN_EID_VHT_OPERATION);
+  const u32 primary = C.ap.freq;
+  g_center_freq1 = primary;
+  if (!ht || ht[1] < 2) return NL80211_CHAN_WIDTH_20_NOHT;
+  const u8 param = ht[3], offset = param & 0x03;                     /* 1 = above the primary, 3 = below */
+  const bool any40 = (param & 0x04) && offset;
+  if (vht && vht[1] >= 5 && primary >= 4900) {
+    const u8 width = vht[2]; u32 centre = freq_of_index(vht[3], primary);
+    if (width == 2 && vht[4] < 200) {                                /* 160 MHz: segment 0 is one half, segment 1 the other */
+      u32 other = freq_of_index(vht[4], primary);
+      if (other == centre - 40 || other == centre + 40) centre = (centre + other) / 2; }
+    if (centre && (centre == primary - 30 || centre == primary - 10 || centre == primary + 10 || centre == primary + 30
+                   || centre == primary - 50 || centre == primary + 50 || centre == primary - 70 || centre == primary + 70)) {
+      g_center_freq1 = centre;
+      if (width == 2) return NL80211_CHAN_WIDTH_160;
+      if (width == 1) return NL80211_CHAN_WIDTH_80;
+      if (width == 3 && vht[4] < 200) return NL80211_CHAN_WIDTH_80P80; } }
+  if (!any40) return NL80211_CHAN_WIDTH_20;
+  g_center_freq1 = offset == 1 ? primary + 10 : primary - 10;
+  return NL80211_CHAN_WIDTH_40; }
+static const char *width_name(enum nl80211_chan_width w) {
+  switch (w) { case NL80211_CHAN_WIDTH_160: return "160"; case NL80211_CHAN_WIDTH_80P80: return "80+80";
+  case NL80211_CHAN_WIDTH_80: return "80"; case NL80211_CHAN_WIDTH_40: return "40"; case NL80211_CHAN_WIDTH_20: return "20";
+  case NL80211_CHAN_WIDTH_20_NOHT: return "20 (no HT)"; default: return "other"; } }
+/* the station-side view of the same width, which is what the driver reads when it names the peer's phymode */
+static enum ieee80211_sta_rx_bandwidth cap_bandwidth(void) {
+  switch (g_width) {
+  case NL80211_CHAN_WIDTH_160: case NL80211_CHAN_WIDTH_80P80: return IEEE80211_STA_RX_BW_160;
+  case NL80211_CHAN_WIDTH_80: return IEEE80211_STA_RX_BW_80;
+  case NL80211_CHAN_WIDTH_40: return IEEE80211_STA_RX_BW_40;
+  default: return IEEE80211_STA_RX_BW_20; } }
+
+static void build_cap_ies(enum nl80211_band band) {
+  g_ht_ie_len = g_vht_ie_len = 0; g_ht_on = g_vht_on = false; g_cap_band = band;
+  struct ieee80211_supported_band *sb = g_hw ? g_hw->wiphy->bands[band] : 0; if (!sb) return;
+  /* The radio's own capability, narrowed to the width the access point runs: a 40 MHz claim on a 20 MHz link is not negotiated. */
+  const bool wide = g_width == NL80211_CHAN_WIDTH_40 || g_width == NL80211_CHAN_WIDTH_80 || g_width == NL80211_CHAN_WIDTH_160;
+  if (sb->ht_cap.ht_supported) {
+    struct ieee80211_ht_cap cap; memset(&cap, 0, sizeof cap);
+    cap.cap_info = cpu_to_le16(sb->ht_cap.cap & ~(wide ? 0 : IEEE80211_HT_CAP_SUP_WIDTH_20_40));
+    cap.ampdu_params_info = (sb->ht_cap.ampdu_factor & 0x3) | ((sb->ht_cap.ampdu_density & 0x7) << 2);
+    memcpy(&cap.mcs, &sb->ht_cap.mcs, sizeof cap.mcs);
+    g_ht_ie[0] = WLAN_EID_HT_CAPABILITY; g_ht_ie[1] = sizeof cap; memcpy(g_ht_ie + 2, &cap, sizeof cap);
+    g_ht_ie_len = 2 + sizeof cap; g_ht_on = true;
+  }
+  if (sb->vht_cap.vht_supported && band != NL80211_BAND_2GHZ) {
+    struct ieee80211_vht_cap cap; memset(&cap, 0, sizeof cap);
+    cap.vht_cap_info = cpu_to_le32(sb->vht_cap.cap);
+    memcpy(&cap.supp_mcs, &sb->vht_cap.vht_mcs, sizeof cap.supp_mcs);
+    g_vht_ie[0] = WLAN_EID_VHT_CAPABILITY; g_vht_ie[1] = sizeof cap; memcpy(g_vht_ie + 2, &cap, sizeof cap);
+    g_vht_ie_len = 2 + sizeof cap; g_vht_on = true;
+  }
+}
 static void send_assoc(void) {
   struct sk_buff *skb = new_frame(256); if (!skb) return;
   mgmt_header(skb, IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ);
@@ -148,22 +224,32 @@ static void send_assoc(void) {
   if (C.secure) {   /* RSN: version 1, group CCMP, pairwise CCMP, key management PSK, no capabilities */
     static const u8 rsn[] = { WLAN_EID_RSN, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0 };
     skb_put_data(skb, rsn, sizeof rsn); }
+  if (g_ht_ie_len) skb_put_data(skb, g_ht_ie, g_ht_ie_len);
+  if (g_vht_ie_len) skb_put_data(skb, g_vht_ie, g_vht_ie_len);
   tx_frame(skb); }
 
 /* ---- chanctx, interface and station entry, in the order a driver of this kind expects ---- */
 static struct ieee80211_channel *chan_for(u32 mhz) { return ieee80211_get_channel_khz(g_hw->wiphy, mhz * 1000); }
 static int bring_up_channel(void) {
   struct ieee80211_channel *ch = chan_for(C.ap.freq); if (!ch) return -ENODEV;
+  for (;;) {
   struct ieee80211_chanctx_conf *ctx = lx_alloc(sizeof *ctx + g_hw->chanctx_data_size + 16, 1); if (!ctx) return -ENOMEM;
-  ctx->def.chan = ch; ctx->def.width = NL80211_CHAN_WIDTH_20; ctx->def.center_freq1 = ch->center_freq; ctx->def.center_freq2 = 0;
+  ctx->def.chan = ch; ctx->def.width = g_width; ctx->def.center_freq2 = 0;
+  ctx->def.center_freq1 = g_width == NL80211_CHAN_WIDTH_20 || g_width == NL80211_CHAN_WIDTH_20_NOHT ? ch->center_freq : g_center_freq1;
   ctx->min_def = ctx->def; ctx->ap = ctx->def; ctx->rx_chains_static = 1; ctx->rx_chains_dynamic = 1;
-  int r = g_ops->add_chanctx(g_hw, ctx); if (r) { lx_free(ctx); return r; }
+  int r = g_ops->add_chanctx(g_hw, ctx);
+  /* A width the driver will not run is not a reason to lose the network: step down once and try again. */
+  if (r && g_width != NL80211_CHAN_WIDTH_20 && g_width != NL80211_CHAN_WIDTH_20_NOHT) {
+    lx_log(4, "wifi: the driver refused a %s MHz channel (%d), retrying at 20 MHz", width_name(g_width), r);
+    lx_free(ctx);
+    g_width = NL80211_CHAN_WIDTH_20; g_center_freq1 = C.ap.freq; continue; }
+  if (r) { lx_free(ctx); return r; }
   C.ctx = ctx; rcu_assign_pointer(g_vif->bss_conf.chanctx_conf, ctx); nw_wifi_chanctx_set(ctx);
   g_vif->bss_conf.bssid = C.ap.bssid; memcpy(g_vif->cfg.ap_addr, C.ap.bssid, 6);
   g_vif->bss_conf.chanreq.oper = ctx->def; g_vif->bss_conf.txpower = ch->max_power; g_vif->bss_conf.txpower_type = NL80211_TX_POWER_AUTOMATIC; g_vif->bss_conf.beacon_int = C.ap.interval ? C.ap.interval : 100; g_vif->bss_conf.dtim_period = 1;
   g_vif->cfg.ssid_len = C.ssid_len; memcpy(g_vif->cfg.ssid, C.ssid, C.ssid_len);
   C.chanctx_up = 1;
-  return 0; }
+  return 0; } }
 static u32 rate_mask(const u8 *ies, unsigned len, enum nl80211_band band) {
   struct ieee80211_supported_band *sb = g_hw->wiphy->bands[band]; u32 mask = 0; if (!sb) return 0;
   for (int pass = 0; pass < 2; pass++) { const u8 *e = find_ie(ies, len, pass ? WLAN_EID_EXT_SUPP_RATES : WLAN_EID_SUPP_RATES); if (!e) continue;
@@ -172,7 +258,11 @@ static u32 rate_mask(const u8 *ies, unsigned len, enum nl80211_band band) {
 static int add_station(void) {
   struct ieee80211_sta *sta = lx_alloc(sizeof *sta + g_hw->sta_data_size + 16, 1); if (!sta) return -ENOMEM;
   memcpy(sta->addr, C.ap.bssid, 6); sta->deflink.sta = sta; memcpy(sta->deflink.addr, C.ap.bssid, 6); sta->deflink.link_id = 0;
-  sta->link[0] = &sta->deflink; sta->max_rx_aggregation_subframes = 8; sta->deflink.rx_nss = 1; sta->deflink.bandwidth = IEEE80211_STA_RX_BW_20;
+  sta->link[0] = &sta->deflink; sta->max_rx_aggregation_subframes = 8; sta->deflink.rx_nss = 1; sta->deflink.bandwidth = cap_bandwidth();
+  /* The driver reads the peer's phymode from the station entry, not from the request it never sees: without these it associates as
+   * MODE_11G and the firmware keeps legacy rates whatever the access point offered. */
+  if (g_ht_on && g_hw->wiphy->bands[g_cap_band]) sta->deflink.ht_cap = g_hw->wiphy->bands[g_cap_band]->ht_cap;
+  if (g_vht_on && g_hw->wiphy->bands[g_cap_band]) sta->deflink.vht_cap = g_hw->wiphy->bands[g_cap_band]->vht_cap;
   sta->wme = true;
   enum nl80211_band band = C.ap.freq >= 5925 ? NL80211_BAND_6GHZ : C.ap.freq >= 4900 ? NL80211_BAND_5GHZ : NL80211_BAND_2GHZ;
   sta->deflink.supp_rates[band] = rate_mask(C.ap.ie, C.ap.ie_len, band);
@@ -411,8 +501,13 @@ static void start_connect(void) {
     if (g_req.pass_len == 64) { for (int i = 0; i < 32; i++) { unsigned v; const char *s = g_req.pass + 2 * i; int hi = (s[0] <= '9' ? s[0] - '0' : (s[0] | 32) - 'a' + 10), lo = (s[1] <= '9' ? s[1] - '0' : (s[1] | 32) - 'a' + 10); v = hi << 4 | lo; C.pmk[i] = v; } }
     else nw_pbkdf2_sha1(g_req.pass, g_req.pass_len, C.ssid, C.ssid_len, 4096, C.pmk, 32);
   } else if (rsn) { lx_log(4, "wifi: network needs a passphrase"); connect_done(NW_RES_BAD_KEY); return; }
-  int r = bring_up_channel(); if (r) { lx_log(3, "wifi: channel setup failed: %d", r); connect_done(NW_RES_FAILED); return; }
   nw_wifi_bss_set(C.ap.bssid, chan_for(C.ap.freq), C.ap.ie, C.ap.ie_len);
+  enum nl80211_band band = C.ap.freq >= 5925 ? NL80211_BAND_6GHZ : C.ap.freq >= 4900 ? NL80211_BAND_5GHZ : NL80211_BAND_2GHZ;
+  g_width = ap_width();
+  build_cap_ies(band);
+  lx_log(6, "wifi: link width %s (%u MHz centre), capabilities HT %s, VHT %s", width_name(g_width), g_center_freq1,
+          g_ht_on ? "yes" : "no", g_vht_on ? "yes" : "no");
+  int r = bring_up_channel(); if (r) { lx_log(3, "wifi: channel setup failed: %d", r); connect_done(NW_RES_FAILED); return; }
   r = g_ops->assign_vif_chanctx(g_hw, g_vif, &g_vif->bss_conf, C.ctx); if (r) { lx_log(3, "wifi: channel assign failed: %d", r); connect_done(NW_RES_FAILED); return; }
   r = add_station(); if (r) { lx_log(3, "wifi: station setup failed: %d", r); connect_done(NW_RES_FAILED); return; }
   g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_BSSID | BSS_CHANGED_TXPOWER);
