@@ -174,7 +174,7 @@ static void log_tap(int level, const char *line) {
          readl(m + 0x48), readl(m + 0x38), readl(m + bhi + 0x28), readl(m + bhi + 0x2c), readl(m + bhi + 0x30), readl(m + bhi + 0x34),
          readl(m + bhi + 0x38), readl(m + bhi + 0x3c)); }
 
-/* The address of a radio whose firmware reports none: the board's file wlan_mac.bin (text, the address as twelve hex digits after the
+/* The address of a radio whose firmware reports none (or a random default one): the board's file wlan_mac.bin (text, the address as twelve hex digits after the
  * last '='), else a locally administered address made up once. */
 static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
 void nw_board_mac(u8 *a) {

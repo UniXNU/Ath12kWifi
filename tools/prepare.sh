@@ -85,15 +85,16 @@ for old, new in (('\tu64 feature_list;\n\n};', '\tu64 feature_list;\n\tu8 nw_on_
 if os.path.lexists(dst): os.remove(dst)
 open(dst, 'w').write(s)
 PY
-# The WCN7850 firmware of this board reports an all-zero address, and a scan interface made with it stops the firmware's replies: the copy
-# of mac.c asks the board (nw_board_mac) for the address of a radio whose address is not valid.
+# The WCN7850 firmware of this board reports an all-zero address (a scan interface made with it stops the firmware's replies) or, from other
+# builds, a random one under the chip maker's default prefix 00:03:7f that changes at every start: the copy of mac.c asks the board
+# (nw_board_mac) for the address of a radio whose address is not valid or carries that prefix.
 python3 - "$A/mac.c" "$O/mac.c" <<'PY'
 import os, sys
 src, dst = sys.argv[1], sys.argv[2]
 s = open(src).read()
 old = '\t\t\tar->mac_addr[4] += ar->pdev_idx;\n\t\t}\n'
 assert s.count(old) == 1, "mac.c address mark"
-s = s.replace(old, old + '\t\tif (!is_valid_ether_addr(ar->mac_addr)) {\n\t\t\tnw_board_mac(ar->mac_addr);\n\t\t\tar->mac_addr[4] += ar->pdev_idx;\n\t\t}\n', 1)
+s = s.replace(old, old + '\t\tif (!is_valid_ether_addr(ar->mac_addr) ||\n\t\t    (!ar->mac_addr[0] && ar->mac_addr[1] == 0x03 && ar->mac_addr[2] == 0x7f)) {\n\t\t\tnw_board_mac(ar->mac_addr);\n\t\t\tar->mac_addr[4] += ar->pdev_idx;\n\t\t}\n', 1)
 s = s.replace('#include "mac.h"\n', '#include "mac.h"\nvoid nw_board_mac(u8 *a);\n', 1)
 # A station without links has no scan link to speak of: the copy scans on the interface's own link (0) so the scan vdev is made the way the
 # interface's ordinary vdev is.
