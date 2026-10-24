@@ -42,7 +42,7 @@ static struct {
   struct ieee80211_key_conf *ptk_key, *gtk_key; u16 seq; u8 gtk_id;
   u64 started; u64 last_tx; int tries; int rsn_ok; u16 aid;
   /* message 4 waits for its acknowledgement before the keys go in: the access point may repeat message 3 in the clear meanwhile */
-  u8 m4[128]; int m4_len, m4_tries, m4_acked; u64 m4_at; u8 gtk[32]; int gtk_len, gtk_idx;
+  u8 gtk[32]; int gtk_len, gtk_idx;
 } C;
 static struct delayed_work g_timer; static struct delayed_work g_scan_timer;
 static int g_scan_running; static int g_connect_waits; static int g_scan_directed; static u8 g_scan_ssid[32]; static u8 g_scan_ssid_len;
@@ -247,10 +247,8 @@ static void install_keys(void) {
   if (install_key(1, 0, C.ptk + 32, 16)) { connect_done(NW_RES_FAILED); return; }
   if (C.gtk_len && install_key(0, C.gtk_idx, C.gtk, 16)) { connect_done(NW_RES_FAILED); return; }
   C.hs_stage = 4; finish_authorized(); }
-/* From the completion of a sent frame: only noted here, the timer acts on it. */
-void nw_sta_eapol_status(bool acked) {
-  if (C.state != NW_STA_KEYS || C.hs_stage != 3) return;
-  if (acked) C.m4_acked = 1; else C.m4_acked = -1; }
+/* From the completion of a sent handshake frame. */
+void nw_sta_eapol_status(bool acked) { if (C.hs_stage >= 3) lx_log(6, "wifi: handshake message 4 %s", acked ? "acknowledged" : "not acknowledged"); }
 static void finish_authorized(void) {
   if (set_sta_state(IEEE80211_STA_AUTHORIZED)) { connect_done(NW_RES_FAILED); return; }
   C.state = NW_STA_UP; nw_wifi_stats.stage = 8; lx_log(6, "wifi: connected"); connect_done(NW_RES_OK); }
@@ -286,12 +284,13 @@ static void handle_eapol(const u8 *p, unsigned len) {
     if (memcmp(k->nonce, C.anonce, 32)) { lx_log(4, "wifi: handshake nonce changed"); return; }
     struct eapol_key *o = (void *)buf; memset(o, 0, sizeof *o); o->ver = 2; o->type = 3; o->desc = 2; unsigned body = sizeof *o - 4; o->len[0] = body >> 8; o->len[1] = body;
     o->info[0] = 0x03; o->info[1] = 0x0a; memcpy(o->replay, k->replay, 8); sign(o, sizeof *o);
-    /* a repeated message 3 gets the answer with its own replay counter, but the time since the first message 4 keeps running */
-    int again = C.hs_stage == 3; C.m4_len = sizeof *o; memcpy(C.m4, o, sizeof *o); C.m4_acked = 0;
-    if (!again) { C.m4_tries = 1; C.m4_at = lx_now_ms(); } else C.m4_tries++;
-    C.gtk_len = gtk && gtklen >= 16 ? 16 : 0; C.gtk_idx = gtkid; if (C.gtk_len) memcpy(C.gtk, gtk, 16);
+    /* As in Linux, the keys go in right after message 4 was queued: the firmware sends a queued message 4 only once the pairwise key is in place
+     * (still in the clear) and drops it otherwise. A repeated message 3 is answered the same way, with its own replay counter. */
+    int again = C.hs_stage >= 3;
     send_eapol(o, sizeof *o); lx_log(6, "wifi: handshake message 4 sent%s (tx acked %u, not acked %u, dropped %u; %s)", again ? " again" : "", nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2], tx_reasons());
-    C.hs_stage = 3; return; }
+    if (again) return;
+    C.gtk_len = gtk && gtklen >= 16 ? 16 : 0; C.gtk_idx = gtkid; if (C.gtk_len) memcpy(C.gtk, gtk, 16);
+    C.hs_stage = 3; install_keys(); return; }
   if (!pairwise && ack) {   /* group key update */
     if (gtk && gtklen >= 16) install_key(0, gtkid, gtk, 16);
     struct eapol_key *o = (void *)buf; memset(o, 0, sizeof *o); o->ver = 2; o->type = 3; o->desc = 2; unsigned body = sizeof *o - 4; o->len[0] = body >> 8; o->len[1] = body;
@@ -366,12 +365,6 @@ static void timer_fn(struct work_struct *w) {
   case NW_STA_AUTH: if (now - C.last_tx >= STEP_TIMEOUT_MS) { if (++C.tries > 7) { connect_done(NW_RES_TIMEOUT); return; } lx_log(6, "wifi: authentication sent again (try %d)", C.tries + 1); send_auth(); } break;
   case NW_STA_ASSOC: if (now - C.last_tx >= STEP_TIMEOUT_MS) { if (++C.tries > 7) { connect_done(NW_RES_TIMEOUT); return; } send_assoc(); } break;
   case NW_STA_KEYS:
-    if (C.hs_stage == 3) {   /* message 4 sent: keys once it was acknowledged; repeated when it was not; after 1.5 s the keys go in anyway */
-      if (C.m4_acked > 0) { lx_log(6, "wifi: handshake message 4 acknowledged (try %d)", C.m4_tries); install_keys(); break; }
-      if (now - C.m4_at >= 1500) { lx_log(4, "wifi: handshake message 4 not acknowledged after %d tries (tx acked %u, not acked %u, dropped %u), keys installed anyway",
-                                         C.m4_tries, nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2]); lx_log(4, "wifi: tx completions: %s", tx_reasons()); install_keys(); break; }
-      if ((C.m4_acked < 0 && C.m4_tries < 6) || now - C.m4_at >= 300 * (u64)C.m4_tries) {
-        C.m4_tries++; C.m4_acked = 0; send_eapol((const struct eapol_key *)C.m4, C.m4_len); } }
     if (C.state == NW_STA_KEYS && now - C.started >= 8000) { lx_log(4, "wifi: key handshake timed out at stage %d (tx acked %u, not acked %u, dropped %u)", C.hs_stage, nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2]); connect_done(C.hs_stage ? NW_RES_BAD_KEY : NW_RES_TIMEOUT); return; } break;
   default: return; }
   lx_queue_delayed(&g_timer, 100); }
