@@ -255,14 +255,62 @@ static u32 rate_mask(const u8 *ies, unsigned len, enum nl80211_band band) {
   for (int pass = 0; pass < 2; pass++) { const u8 *e = find_ie(ies, len, pass ? WLAN_EID_EXT_SUPP_RATES : WLAN_EID_SUPP_RATES); if (!e) continue;
     for (int i = 0; i < e[1]; i++) { int rate = (e[2 + i] & 0x7f) * 5; for (int k = 0; k < sb->n_bitrates; k++) if (sb->bitrates[k].bitrate == rate) mask |= 1u << k; } }
   return mask; }
+/* The station entry describes the access point, so it carries the access point's own HT and VHT capability from its beacon, narrowed
+ * to what this radio can do with it. The driver picks the peer's phymode and the firmware its transmit rates from this entry: with this
+ * radio's capability in it instead (two streams, LDPC, STBC, beamforming), the firmware sent most frames in a form the access point
+ * never acknowledged (i477: 267 acknowledged, 596 dropped after retries). */
+static void peer_caps(struct ieee80211_sta *sta) {
+  struct ieee80211_supported_band *sb = g_hw->wiphy->bands[g_cap_band]; if (!sb) return;
+  const bool wide = g_width == NL80211_CHAN_WIDTH_40 || g_width == NL80211_CHAN_WIDTH_80 || g_width == NL80211_CHAN_WIDTH_160;
+  const u8 *hte = find_ie(C.ap.ie, C.ap.ie_len, WLAN_EID_HT_CAPABILITY);
+  int nss = 0;
+  if (g_ht_on && hte && hte[1] >= sizeof(struct ieee80211_ht_cap)) {
+    const struct ieee80211_ht_cap *ap = (const void *)(hte + 2); struct ieee80211_sta_ht_cap *h = &sta->deflink.ht_cap; const u16 own = sb->ht_cap.cap;
+    u16 cap = le16_to_cpu(ap->cap_info);
+    if (!(own & IEEE80211_HT_CAP_LDPC_CODING)) cap &= ~IEEE80211_HT_CAP_LDPC_CODING;
+    if (!(own & IEEE80211_HT_CAP_SGI_20)) cap &= ~IEEE80211_HT_CAP_SGI_20;
+    if (!(own & IEEE80211_HT_CAP_SGI_40) || !wide) cap &= ~IEEE80211_HT_CAP_SGI_40;
+    if (!wide) cap &= ~IEEE80211_HT_CAP_SUP_WIDTH_20_40;
+    if (!(own & IEEE80211_HT_CAP_TX_STBC)) cap &= ~IEEE80211_HT_CAP_RX_STBC;     /* it receives STBC only if we send it */
+    if (!(own & IEEE80211_HT_CAP_RX_STBC)) cap &= ~IEEE80211_HT_CAP_TX_STBC;
+    h->ht_supported = true; h->cap = cap;
+    h->ampdu_factor = ap->ampdu_params_info & IEEE80211_HT_AMPDU_PARM_FACTOR;
+    h->ampdu_density = (ap->ampdu_params_info & IEEE80211_HT_AMPDU_PARM_DENSITY) >> IEEE80211_HT_AMPDU_PARM_DENSITY_SHIFT;
+    memset(&h->mcs, 0, sizeof h->mcs);
+    for (int i = 0; i < IEEE80211_HT_MCS_MASK_LEN; i++) h->mcs.rx_mask[i] = ap->mcs.rx_mask[i] & sb->ht_cap.mcs.rx_mask[i];
+    h->mcs.rx_highest = ap->mcs.rx_highest; h->mcs.tx_params = ap->mcs.tx_params;
+    for (int i = 0; i < 4; i++) if (h->mcs.rx_mask[i]) nss = i + 1;
+  }
+  const u8 *vhte = find_ie(C.ap.ie, C.ap.ie_len, WLAN_EID_VHT_CAPABILITY);
+  if (g_vht_on && sta->deflink.ht_cap.ht_supported && vhte && vhte[1] >= sizeof(struct ieee80211_vht_cap)) {
+    const struct ieee80211_vht_cap *ap = (const void *)(vhte + 2); struct ieee80211_sta_vht_cap *v = &sta->deflink.vht_cap; const u32 own = sb->vht_cap.cap;
+    u32 cap = le32_to_cpu(ap->vht_cap_info);
+    if (!(own & IEEE80211_VHT_CAP_RXLDPC)) cap &= ~IEEE80211_VHT_CAP_RXLDPC;
+    if (!(own & IEEE80211_VHT_CAP_SHORT_GI_80)) cap &= ~IEEE80211_VHT_CAP_SHORT_GI_80;
+    if (!(own & IEEE80211_VHT_CAP_SHORT_GI_160) || g_width != NL80211_CHAN_WIDTH_160) cap &= ~IEEE80211_VHT_CAP_SHORT_GI_160;
+    if (g_width != NL80211_CHAN_WIDTH_160 && g_width != NL80211_CHAN_WIDTH_80P80) cap &= ~(IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_MASK | IEEE80211_VHT_CAP_EXT_NSS_BW_MASK);
+    if (!(own & IEEE80211_VHT_CAP_TXSTBC)) cap &= ~IEEE80211_VHT_CAP_RXSTBC_MASK;
+    if (!(own & IEEE80211_VHT_CAP_RXSTBC_MASK)) cap &= ~IEEE80211_VHT_CAP_TXSTBC;
+    /* no sounding is set up here: leave beamforming out on both sides */
+    cap &= ~(IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE | IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE | IEEE80211_VHT_CAP_MU_BEAMFORMER_CAPABLE |
+             IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE | IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK | IEEE80211_VHT_CAP_SOUNDING_DIMENSIONS_MASK);
+    v->vht_supported = true; v->cap = cap; v->vht_mcs = ap->supp_mcs;
+    int vn = 0; const u16 map = le16_to_cpu(ap->supp_mcs.rx_mcs_map);
+    for (int i = 0; i < 8; i++) if (((map >> (2 * i)) & 3) != IEEE80211_VHT_MCS_NOT_SUPPORTED) vn = i + 1;
+    if (vn > nss) nss = vn;
+  }
+  { int own_nss = 0; for (int i = 0; i < 4; i++) if (sb->ht_cap.mcs.rx_mask[i]) own_nss = i + 1; if (own_nss && nss > own_nss) nss = own_nss; }
+  sta->deflink.rx_nss = nss ? nss : 1;
+  if (!sta->deflink.vht_cap.vht_supported && sta->deflink.bandwidth > IEEE80211_STA_RX_BW_40) sta->deflink.bandwidth = IEEE80211_STA_RX_BW_40;
+  if (!sta->deflink.ht_cap.ht_supported) sta->deflink.bandwidth = IEEE80211_STA_RX_BW_20;
+  lx_log(6, "wifi: peer HT %s cap %04x, VHT %s cap %08x, %d stream%s, width %d", sta->deflink.ht_cap.ht_supported ? "yes" : "no", sta->deflink.ht_cap.cap,
+         sta->deflink.vht_cap.vht_supported ? "yes" : "no", sta->deflink.vht_cap.cap, sta->deflink.rx_nss, sta->deflink.rx_nss == 1 ? "" : "s", sta->deflink.bandwidth);
+}
 static int add_station(void) {
   struct ieee80211_sta *sta = lx_alloc(sizeof *sta + g_hw->sta_data_size + 16, 1); if (!sta) return -ENOMEM;
   memcpy(sta->addr, C.ap.bssid, 6); sta->deflink.sta = sta; memcpy(sta->deflink.addr, C.ap.bssid, 6); sta->deflink.link_id = 0;
   sta->link[0] = &sta->deflink; sta->max_rx_aggregation_subframes = 8; sta->deflink.rx_nss = 1; sta->deflink.bandwidth = cap_bandwidth();
-  /* The driver reads the peer's phymode from the station entry, not from the request it never sees: without these it associates as
-   * MODE_11G and the firmware keeps legacy rates whatever the access point offered. */
-  if (g_ht_on && g_hw->wiphy->bands[g_cap_band]) sta->deflink.ht_cap = g_hw->wiphy->bands[g_cap_band]->ht_cap;
-  if (g_vht_on && g_hw->wiphy->bands[g_cap_band]) sta->deflink.vht_cap = g_hw->wiphy->bands[g_cap_band]->vht_cap;
+  peer_caps(sta);
   sta->wme = true;
   enum nl80211_band band = C.ap.freq >= 5925 ? NL80211_BAND_6GHZ : C.ap.freq >= 4900 ? NL80211_BAND_5GHZ : NL80211_BAND_2GHZ;
   sta->deflink.supp_rates[band] = rate_mask(C.ap.ie, C.ap.ie_len, band);
