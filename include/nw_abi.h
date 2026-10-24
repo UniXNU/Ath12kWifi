@@ -56,7 +56,7 @@ int nw_wifi_tx(const uint8_t *eth, size_t len);                          /* 0 qu
 void nw_wifi_status_get(struct nw_wifi_status *st);
 void nw_wifi_tx_reasons(char *text, int size);                          /* the driver's transmit completion counts, as text */
 int nw_wifi_start(const struct lx_platform *p, const struct nw_board *b);
-int nw_wifi_step(void);
+int nw_wifi_step(void);                                                   /* nonzero while frames move: call again without sleeping */
 void nw_wifi_stop(void);
 extern struct nw_wifi_stats nw_wifi_stats;
 /* What the dispatcher runs now: kind (1 interrupt handler, 2 timer, 3 work, 4 board poll, 0 nothing), the function as an offset from

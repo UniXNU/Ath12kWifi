@@ -570,6 +570,7 @@ static void send_queued(void) {
     if (!it) return;
     if (C.state == NW_STA_UP && it->len >= 14) tx_eth(it->data, it->len);
     lx_free(it); } }
+int nw_sta_tx_pending(void) { return g_txq_n != 0; }
 int nw_wifi_tx(const uint8_t *eth, size_t len) {
   if (len < 14 || len > 2000) return -1; if (g_txq_n >= 128) return -2;
   struct txq_item *it = lx_plat->alloc(sizeof *it + len); if (!it) return -3; it->len = len; it->next = 0; memcpy(it->data, eth, len);
