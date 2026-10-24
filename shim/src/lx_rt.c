@@ -16,6 +16,11 @@ static struct list_head g_timers = LIST_HEAD_INIT(g_timers);   /* delayed_work e
 static struct { int used; unsigned int irq; irq_handler_t h, t; void *id; int pending; int disabled, strict; } g_irq[64];
 static u32 g_seed = 0x2545f491u;
 static int g_depth;
+/* What runs right now, further out in the nesting: a wait inside one of them pumps again, and like in Linux a work item or an interrupt handler
+ * does not run a second time inside itself (it stays queued or pending until the outer run returned). Kept by pointer: a work function may free
+ * its own item. */
+static const void *g_running[LX_MAX_DEPTH + 2]; static int g_nrunning;
+static int is_running(const void *p) { for (int i = 0; i < g_nrunning; i++) if (g_running[i] == p) return 1; return 0; }
 static char *g_stack_top; unsigned long lx_stack_peak, lx_depth_peak;
 
 u64 lx_now_ms(void) { return lx_plat->now_ms(); }
@@ -85,24 +90,30 @@ int lx_pump(void) {
   /* The endpoint's interrupts are writes into a sink nobody watches: every handler is offered a look about once a millisecond, in every wait as well
    * as in the board's loop (a handler finds out from its own device registers whether there is anything to do). */
   { static u64 last_raise; u64 t = lx_now_ms(); if (t != last_raise) { last_raise = t; lx_irq_raise_all(); } }
-  for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].pending && !g_irq[i].disabled) {
+  for (int i = 0; i < 64; i++) if (g_irq[i].used && g_irq[i].pending && !g_irq[i].disabled && !is_running(&g_irq[i])) {
     g_irq[i].pending = 0; ran = 1;
     where(1, (const void *)g_irq[i].h);
+    g_running[g_nrunning++] = &g_irq[i];
     irqreturn_t r = g_irq[i].h ? g_irq[i].h(g_irq[i].irq, g_irq[i].id) : IRQ_WAKE_THREAD;
     if (r == IRQ_WAKE_THREAD && g_irq[i].t) g_irq[i].t(g_irq[i].irq, g_irq[i].id);
+    g_nrunning--;
   }
   u64 now = lx_now_ms();
   struct list_head *p, *n;
   for (p = g_timers.next; p != &g_timers; p = n) {
     n = p->next; struct delayed_work *d = container_of(p, struct delayed_work, work.entry);
-    if (d->armed && now >= d->due) { d->armed = 0; list_del_init(p); ran = 1; where(2, (const void *)d->work.func); d->work.func(&d->work); }
+    if (d->armed && now >= d->due && !is_running(&d->work)) {
+      d->armed = 0; list_del_init(p); ran = 1; where(2, (const void *)d->work.func);
+      g_running[g_nrunning++] = &d->work; d->work.func(&d->work); g_nrunning--; }
   }
   /* one item at a time off the shared list, so a wait inside a work function still reaches work queued behind it */
-  for (int budget = 256; budget > 0 && !list_empty(&g_work); budget--) {
-    struct work_struct *w = list_first_entry(&g_work, struct work_struct, entry);
+  for (int budget = 256; budget > 0; budget--) {
+    struct work_struct *w = 0; struct list_head *e;
+    for (e = g_work.next; e != &g_work; e = e->next) { struct work_struct *c = container_of(e, struct work_struct, entry); if (!is_running(c)) { w = c; break; } }
+    if (!w) break;
     list_del_init(&w->entry); w->queued = 0; ran = 1;
     where(3, (const void *)w->func);
-    if (w->func) w->func(w);
+    g_running[g_nrunning++] = w; if (w->func) w->func(w); g_nrunning--;
   }
   g_depth--;
   where(0, 0);
