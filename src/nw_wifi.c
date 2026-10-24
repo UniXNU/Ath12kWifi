@@ -108,6 +108,13 @@ static void wmi_stuck(void) {
   ddr_check(ab);
   lx_log(3, "stuck: asking for the RAM dump: %d", mhi_force_rddm_mode(ath12k_pci_priv(ab)->mhi_ctrl));
 }
+/* The driver's counts of transmit completions: by the module that released the frame, the firmware's status and the queue manager's reason. */
+void nw_wifi_tx_reasons(char *b, int n) {
+  b[0] = 0; if (!g_hw) return;
+  struct ath12k *ar = ath12k_ah_to_ar(g_hw->priv, 0); struct ath12k_device_dp_stats *st = &ath12k_ab_to_dp(ar->ab)->device_stats; int o = 0;
+  o += snprintf(b + o, n - o, "src"); for (int i = 0; i < HAL_WBM_REL_SRC_MODULE_MAX && o < n; i++) o += snprintf(b + o, n - o, " %u", st->tx_wbm_rel_source[i]);
+  if (o < n) o += snprintf(b + o, n - o, " fw"); for (int i = 0; i < MAX_FW_TX_STATUS && o < n; i++) o += snprintf(b + o, n - o, " %u", st->fw_tx_status[i]);
+  if (o < n) o += snprintf(b + o, n - o, " tqm"); for (int i = 0; i < MAX_TQM_RELEASE_REASON && o < n; i++) o += snprintf(b + o, n - o, " %u", st->tqm_rel_reason[i]); }
 static void log_tap(int level, const char *line) {
   static int done; (void)level;
   if (!g_wmi_stuck && has_text(line, "wmi command") && has_text(line, "timeout")) g_wmi_stuck = 1;

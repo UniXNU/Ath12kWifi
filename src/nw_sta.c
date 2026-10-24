@@ -225,6 +225,8 @@ static void send_eapol(const struct eapol_key *k, unsigned total) {
   struct sk_buff *skb = new_frame(total + 64); if (!skb) return;
   struct ieee80211_hdr *h = skb_put_zero(skb, 26); h->frame_control = cpu_to_le16(IEEE80211_FTYPE_DATA | IEEE80211_STYPE_QOS_DATA | IEEE80211_FCTL_TODS);
   memcpy(h->addr1, C.ap.bssid, 6); memcpy(h->addr2, g_vif->addr, 6); memcpy(h->addr3, C.ap.bssid, 6); h->seq_ctrl = cpu_to_le16(C.seq++ << 4);
+  /* like mac80211's control port frames: the highest priority (voice, TID 7) */
+  ((u8 *)h)[24] = 7; skb->priority = 7;
   static const u8 snap[8] = { 0xaa, 0xaa, 3, 0, 0, 0, 0x88, 0x8e }; skb_put_data(skb, snap, 8); skb_put_data(skb, k, total);
   skb->protocol = cpu_to_be16(ETH_P_PAE);   /* the driver sends the handshake as an 802.11 frame on an Ethernet interface */
   tx_frame(skb); }
@@ -239,6 +241,8 @@ static int install_key(int pairwise, int idx, const u8 *key, int len) {
   if (pairwise) { C.ptk_key = kc; } else { C.gtk_key = kc; }
   return 0; }
 static void finish_authorized(void);
+void nw_wifi_tx_reasons(char *b, int n);
+static const char *tx_reasons(void) { static char b[160]; nw_wifi_tx_reasons(b, sizeof b); return b; }
 static void install_keys(void) {
   if (install_key(1, 0, C.ptk + 32, 16)) { connect_done(NW_RES_FAILED); return; }
   if (C.gtk_len && install_key(0, C.gtk_idx, C.gtk, 16)) { connect_done(NW_RES_FAILED); return; }
@@ -286,7 +290,7 @@ static void handle_eapol(const u8 *p, unsigned len) {
     int again = C.hs_stage == 3; C.m4_len = sizeof *o; memcpy(C.m4, o, sizeof *o); C.m4_acked = 0;
     if (!again) { C.m4_tries = 1; C.m4_at = lx_now_ms(); } else C.m4_tries++;
     C.gtk_len = gtk && gtklen >= 16 ? 16 : 0; C.gtk_idx = gtkid; if (C.gtk_len) memcpy(C.gtk, gtk, 16);
-    send_eapol(o, sizeof *o); lx_log(6, "wifi: handshake message 4 sent%s (tx acked %u, not acked %u, dropped %u)", again ? " again" : "", nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2]);
+    send_eapol(o, sizeof *o); lx_log(6, "wifi: handshake message 4 sent%s (tx acked %u, not acked %u, dropped %u; %s)", again ? " again" : "", nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2], tx_reasons());
     C.hs_stage = 3; return; }
   if (!pairwise && ack) {   /* group key update */
     if (gtk && gtklen >= 16) install_key(0, gtkid, gtk, 16);
@@ -365,7 +369,7 @@ static void timer_fn(struct work_struct *w) {
     if (C.hs_stage == 3) {   /* message 4 sent: keys once it was acknowledged; repeated when it was not; after 1.5 s the keys go in anyway */
       if (C.m4_acked > 0) { lx_log(6, "wifi: handshake message 4 acknowledged (try %d)", C.m4_tries); install_keys(); break; }
       if (now - C.m4_at >= 1500) { lx_log(4, "wifi: handshake message 4 not acknowledged after %d tries (tx acked %u, not acked %u, dropped %u), keys installed anyway",
-                                         C.m4_tries, nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2]); install_keys(); break; }
+                                         C.m4_tries, nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2]); lx_log(4, "wifi: tx completions: %s", tx_reasons()); install_keys(); break; }
       if ((C.m4_acked < 0 && C.m4_tries < 6) || now - C.m4_at >= 300 * (u64)C.m4_tries) {
         C.m4_tries++; C.m4_acked = 0; send_eapol((const struct eapol_key *)C.m4, C.m4_len); } }
     if (C.state == NW_STA_KEYS && now - C.started >= 8000) { lx_log(4, "wifi: key handshake timed out at stage %d (tx acked %u, not acked %u, dropped %u)", C.hs_stage, nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2]); connect_done(C.hs_stage ? NW_RES_BAD_KEY : NW_RES_TIMEOUT); return; } break;
