@@ -13,8 +13,6 @@
 #define IE_MAX 384
 #define EAPOL_RETRY_MS 1500
 #define STEP_TIMEOUT_MS 300
-/* No regulatory domain is applied, so a channel keeps the driver's 30 dBm default; a client stays at the usual 20 dBm (within every region's limit). */
-#define STA_TXPOWER_DBM 20
 
 static u8 OUI_RSN[3] = { 0x00, 0x0f, 0xac };
 
@@ -160,7 +158,7 @@ static int bring_up_channel(void) {
   int r = g_ops->add_chanctx(g_hw, ctx); if (r) { lx_free(ctx); return r; }
   C.ctx = ctx; rcu_assign_pointer(g_vif->bss_conf.chanctx_conf, ctx); nw_wifi_chanctx_set(ctx);
   g_vif->bss_conf.bssid = C.ap.bssid; memcpy(g_vif->cfg.ap_addr, C.ap.bssid, 6);
-  g_vif->bss_conf.chanreq.oper = ctx->def; g_vif->bss_conf.txpower = min_t(int, ch->max_power, STA_TXPOWER_DBM); g_vif->bss_conf.txpower_type = NL80211_TX_POWER_AUTOMATIC; g_vif->bss_conf.beacon_int = C.ap.interval ? C.ap.interval : 100; g_vif->bss_conf.dtim_period = 1;
+  g_vif->bss_conf.chanreq.oper = ctx->def; g_vif->bss_conf.txpower = ch->max_power; g_vif->bss_conf.txpower_type = NL80211_TX_POWER_AUTOMATIC; g_vif->bss_conf.beacon_int = C.ap.interval ? C.ap.interval : 100; g_vif->bss_conf.dtim_period = 1;
   g_vif->cfg.ssid_len = C.ssid_len; memcpy(g_vif->cfg.ssid, C.ssid, C.ssid_len);
   C.chanctx_up = 1;
   return 0; }
@@ -457,8 +455,6 @@ void nw_sta_run(void) {
 void nw_sta_link_lost(void) { if (C.state >= NW_STA_AUTH) teardown(1, 0); }
 void nw_sta_ready(struct ieee80211_hw *hw) {
   int r; g_hw = hw; g_ops = nw_wifi_ops(); nw_wifi_stats.stage = 3;
-  for (int b = 0; b < NUM_NL80211_BANDS; b++) if (hw->wiphy->bands[b]) for (int i = 0; i < hw->wiphy->bands[b]->n_channels; i++) {   /* vdev start passes these on */
-    struct ieee80211_channel *c = &hw->wiphy->bands[b]->channels[i]; if (c->max_power > STA_TXPOWER_DBM) c->max_power = STA_TXPOWER_DBM; if (c->max_reg_power > STA_TXPOWER_DBM) c->max_reg_power = STA_TXPOWER_DBM; }
   r = g_ops->start(hw); if (r) { lx_log(3, "wifi: start failed: %d", r); nw_wifi_stats.last_err = r; return; }
   g_vif = lx_alloc(sizeof *g_vif + hw->vif_data_size + 64, 1); if (!g_vif) return;
   g_vif->type = NL80211_IFTYPE_STATION; g_vif->bss_conf.vif = g_vif; g_vif->bss_conf.link_id = 0; g_vif->link_conf[0] = &g_vif->bss_conf;
