@@ -169,7 +169,17 @@ void ieee80211_iterate_stations_atomic(struct ieee80211_hw *hw, void (*it)(void 
 void ieee80211_iter_chan_contexts_atomic(struct ieee80211_hw *hw, void (*it)(struct ieee80211_hw *, struct ieee80211_chanctx_conf *, void *), void *data) { if (g_ctx) it(hw, g_ctx, data); }
 struct ieee80211_sta *ieee80211_find_sta(struct ieee80211_vif *v, const u8 *addr) { (void)v; return g_sta && ether_addr_equal(g_sta->addr, addr) ? g_sta : 0; }
 
-/* No stored networks yet: the station code keeps its own list. */
+/* The station code keeps its own list of networks; the one it joins is known here too, with its elements: the driver reads its security
+ * element from it and so tells the firmware that the station needs the key handshake (the firmware drops message 4 otherwise). */
+static struct cfg80211_bss *g_bss;
+void nw_wifi_bss_set(const u8 *bssid, struct ieee80211_channel *ch, const u8 *ie, unsigned len) {
+  if (g_bss) { lx_free((void *)rcu_access_pointer(g_bss->ies)); lx_free(g_bss); g_bss = 0; }
+  if (!bssid) return;
+  struct cfg80211_bss *b = lx_alloc(sizeof *b + 64, 1); struct cfg80211_bss_ies *ies = lx_alloc(sizeof *ies + len, 1);
+  if (!b || !ies) { lx_free(b); lx_free(ies); return; }
+  ies->len = len; memcpy(ies->data, ie, len); memcpy(b->bssid, bssid, 6); b->channel = ch;
+  rcu_assign_pointer(b->ies, ies); rcu_assign_pointer(b->beacon_ies, ies); g_bss = b; }
 struct cfg80211_bss *__cfg80211_get_bss(struct wiphy *w, struct ieee80211_channel *c, const u8 *bssid, const u8 *ssid, size_t ssid_len, enum ieee80211_bss_type t, enum ieee80211_privacy p, u32 use_for) {
-  (void)w; (void)c; (void)bssid; (void)ssid; (void)ssid_len; (void)t; (void)p; (void)use_for; return 0; }
+  (void)w; (void)c; (void)ssid; (void)ssid_len; (void)t; (void)p; (void)use_for;
+  return g_bss && (!bssid || ether_addr_equal(g_bss->bssid, bssid)) ? g_bss : 0; }
 struct ieee80211_sta *__ieee80211_iterate_stations(struct ieee80211_hw *hw, struct ieee80211_sta *prev) { (void)hw; return prev ? 0 : g_sta; }

@@ -230,16 +230,6 @@ static void send_eapol(const struct eapol_key *k, unsigned total) {
   static const u8 snap[8] = { 0xaa, 0xaa, 3, 0, 0, 0, 0x88, 0x8e }; skb_put_data(skb, snap, 8); skb_put_data(skb, k, total);
   skb->protocol = cpu_to_be16(ETH_P_PAE);   /* the driver sends the handshake as an 802.11 frame on an Ethernet interface */
   tx_frame(skb); }
-/* Message 4 goes the way of ordinary data: an Ethernet frame the hardware makes the 802.11 frame of (in the clear, no key is given), at the
- * highest priority. The firmware dropped it when it came as an 802.11 frame. */
-static void send_eapol_eth(const struct eapol_key *k, unsigned total) {
-  struct sk_buff *skb = new_frame(14 + total); if (!skb) return;
-  u8 *e = skb_put(skb, 14); memcpy(e, C.ap.bssid, 6); memcpy(e + 6, g_vif->addr, 6); e[12] = 0x88; e[13] = 0x8e; skb_put_data(skb, k, total);
-  skb->protocol = cpu_to_be16(ETH_P_PAE); skb->priority = 7;
-  struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb); memset(info, 0, sizeof *info);
-  info->control.vif = g_vif; info->flags = IEEE80211_TX_CTL_HW_80211_ENCAP;
-  struct ieee80211_tx_control ctl = { .sta = C.sta };
-  C.last_tx = lx_now_ms(); g_ops->tx(g_hw, &ctl, skb); }
 void nw_wifi_htt_stats(int type);
 static void sign(struct eapol_key *k, unsigned total) {
   u8 h[20]; memset(k->mic, 0, 16); nw_hmac_sha1(C.ptk, 16, (const u8 *)k, total, h); memcpy(k->mic, h, 16); }
@@ -300,7 +290,7 @@ static void handle_eapol(const u8 *p, unsigned len) {
     /* The keys go in once message 4 completed (the timer does it, at the latest after 300 ms). A repeated message 3 is answered the same way, with
      * its own replay counter. */
     int again = C.hs_stage >= 3;
-    send_eapol_eth(o, sizeof *o); lx_log(6, "wifi: handshake message 4 sent%s (tx acked %u, not acked %u, dropped %u; %s)", again ? " again" : "", nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2], tx_reasons());
+    send_eapol(o, sizeof *o); lx_log(6, "wifi: handshake message 4 sent%s (tx acked %u, not acked %u, dropped %u; %s)", again ? " again" : "", nw_eapol_tx[0], nw_eapol_tx[1], nw_eapol_tx[2], tx_reasons());
     if (again) return;
     C.gtk_len = gtk && gtklen >= 16 ? 16 : 0; C.gtk_idx = gtkid; if (C.gtk_len) memcpy(C.gtk, gtk, 16);
     C.hs_stage = 3; C.m4_done = 0; C.m4_at = lx_now_ms(); return; }
@@ -370,6 +360,7 @@ static void teardown(int notify_lost, int reason) {
     while (C.sta_state > IEEE80211_STA_NOTEXIST) { if (g_ops->sta_state(g_hw, g_vif, C.sta, C.sta_state, C.sta_state - 1)) break; C.sta_state--; }
     nw_wifi_sta_set(0); lx_free(C.sta); C.sta = 0; }
   if (C.ctx) { g_ops->unassign_vif_chanctx(g_hw, g_vif, &g_vif->bss_conf, C.ctx); g_ops->remove_chanctx(g_hw, C.ctx); RCU_INIT_POINTER(g_vif->bss_conf.chanctx_conf, NULL); nw_wifi_chanctx_set(0); lx_free(C.ctx); C.ctx = 0; }
+  nw_wifi_bss_set(0, 0, 0, 0);
   g_vif->bss_conf.bssid = g_no_bssid; C.ptk_ready = 0; C.hs_stage = 0; C.have_replay = 0; C.chanctx_up = 0;
   if (notify_lost) { C.state = NW_STA_IDLE; if (g_ev.link_lost) g_ev.link_lost(reason); } }
 static void timer_fn(struct work_struct *w) {
@@ -403,6 +394,7 @@ static void start_connect(void) {
     else nw_pbkdf2_sha1(g_req.pass, g_req.pass_len, C.ssid, C.ssid_len, 4096, C.pmk, 32);
   } else if (rsn) { lx_log(4, "wifi: network needs a passphrase"); connect_done(NW_RES_BAD_KEY); return; }
   int r = bring_up_channel(); if (r) { lx_log(3, "wifi: channel setup failed: %d", r); connect_done(NW_RES_FAILED); return; }
+  nw_wifi_bss_set(C.ap.bssid, chan_for(C.ap.freq), C.ap.ie, C.ap.ie_len);
   r = g_ops->assign_vif_chanctx(g_hw, g_vif, &g_vif->bss_conf, C.ctx); if (r) { lx_log(3, "wifi: channel assign failed: %d", r); connect_done(NW_RES_FAILED); return; }
   r = add_station(); if (r) { lx_log(3, "wifi: station setup failed: %d", r); connect_done(NW_RES_FAILED); return; }
   g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_BSSID | BSS_CHANGED_TXPOWER);
