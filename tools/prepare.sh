@@ -25,8 +25,10 @@ if 'nw_mhi_pre_load' not in s:
 open(p,'w').write(s)
 PY
 # The refill ring of the receive buffers is the largest user of the endpoint's DMA window; the copy of dp.h makes it 512 buffers instead of 4096.
-rm -f $O/dp.h; sed 's/^#define DP_RXDMA_BUF_RING_SIZE\t\t4096/#define DP_RXDMA_BUF_RING_SIZE\t\t512/' $A/dp.h > $O/dp.h
-grep -q 'DP_RXDMA_BUF_RING_SIZE.*512' $O/dp.h || { echo "dp.h patch missed" >&2; exit 1; }
+# The firmware spreads those buffers over one ring per radio MAC, and the ring of the MAC that receives nothing keeps what it gets: at 2048
+# entries it ends up holding all 512 and the other MAC stops receiving after some hundred frames. At 128 entries it can hold at most a quarter.
+rm -f $O/dp.h; sed -e 's/^#define DP_RXDMA_BUF_RING_SIZE\t\t4096/#define DP_RXDMA_BUF_RING_SIZE\t\t512/' -e 's/^#define DP_RX_MAC_BUF_RING_SIZE\t\t2048/#define DP_RX_MAC_BUF_RING_SIZE\t\t128/' $A/dp.h > $O/dp.h
+grep -q 'DP_RXDMA_BUF_RING_SIZE.*512' $O/dp.h && grep -q 'DP_RX_MAC_BUF_RING_SIZE.*128' $O/dp.h || { echo "dp.h patch missed" >&2; exit 1; }
 # Sending a command is the condition of the wait in ath12k_wmi_cmd_send: that wait must evaluate it once per round and never after it has succeeded.
 rm -f $O/wmi.c; sed '/^int ath12k_wmi_cmd_send(/,/^}/ s/wait_event_timeout(/wait_event_timeout_once(/' $A/wmi.c > $O/wmi.c
 grep -q 'wait_event_timeout_once' $O/wmi.c || { echo "wmi.c patch missed" >&2; exit 1; }
@@ -114,6 +116,14 @@ for src, dst, old, new in ((sys.argv[1], sys.argv[2], 'vaddr = kzalloc(hw_desc_s
     s = open(src).read()
     assert s.count(old) == 1, "reoq mark " + old[:20]
     s = s.replace(old, new, 1)
+    if dst == sys.argv[2]:
+        # Buffers taken from a destination ring go back to the refill ring even when none of them completed a frame (all pushed with an error,
+        # or the last one continues): skipping the refill then loses them for good, and after some hundred frames the device has none left.
+        old = '\tif (!total_msdu_reaped)\n\t\tgoto exit;\n\n\tfor (device_id = 0; device_id < ATH12K_MAX_DEVICES; device_id++) {\n\t\tif (!num_buffs_reaped[device_id])\n\t\t\tcontinue;\n\n\t\tpartner_dp = ath12k_dp_hw_grp_to_dp(dp_hw_grp, device_id);\n\t\trx_ring = &partner_dp->rx_refill_buf_ring;\n\n\t\tath12k_dp_rx_bufs_replenish(partner_dp,'
+        assert s.count(old) == 1, "refill mark"
+        s = s.replace(old, old.replace('\tif (!total_msdu_reaped)\n\t\tgoto exit;\n\n', ''), 1)
+        assert s.count('exit:\n\treturn total_msdu_reaped;') == 1, "refill exit mark"
+        s = s.replace('exit:\n\treturn total_msdu_reaped;', '\treturn total_msdu_reaped;', 1)
     if os.path.lexists(dst): os.remove(dst)
     open(dst, 'w').write(s)
 PY
