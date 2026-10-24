@@ -54,6 +54,7 @@ int nw_wifi_connect(const uint8_t *ssid, size_t len, const uint8_t *bssid, const
 void nw_wifi_disconnect(void);
 int nw_wifi_tx(const uint8_t *eth, size_t len);                          /* 0 queued */
 void nw_wifi_status_get(struct nw_wifi_status *st);
+void nw_wifi_tx_reasons(char *text, int size);                          /* the driver's transmit completion counts, as text */
 int nw_wifi_start(const struct lx_platform *p, const struct nw_board *b);
 int nw_wifi_step(void);
 void nw_wifi_stop(void);
