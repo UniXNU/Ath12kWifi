@@ -22,9 +22,10 @@ struct nw_wifi_stats nw_wifi_stats;
 static void on_rx(struct ieee80211_hw *hw, struct sk_buff *skb) { (void)hw; nw_sta_rx(skb); }
 static void on_scan_done(struct ieee80211_hw *hw, bool aborted) { (void)hw; nw_sta_scan_done(aborted); }
 static void on_lost(void) { nw_sta_link_lost(); }
+static void on_eapol_status(bool acked) { nw_sta_eapol_status(acked); }
 static struct ieee80211_hw *g_hw;
 static void on_registered(struct ieee80211_hw *hw) { g_hw = hw; nw_sta_ready(hw); }
-static const struct nw_wifi_hooks hooks = { .registered = on_registered, .rx = on_rx, .scan_done = on_scan_done, .beacon_loss = on_lost };
+static const struct nw_wifi_hooks hooks = { .registered = on_registered, .rx = on_rx, .scan_done = on_scan_done, .beacon_loss = on_lost, .eapol_status = on_eapol_status };
 
 /* The first time the MHI core reports the device's RAM dump state, the boot interface's registers say where the boot stopped. */
 static int has_text(const char *s, const char *w) {

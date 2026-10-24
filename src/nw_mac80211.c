@@ -112,7 +112,10 @@ void ieee80211_remain_on_channel_expired(struct ieee80211_hw *hw) { (void)hw; }
 /* transmit completion and queue control */
 void ieee80211_free_txskb(struct ieee80211_hw *hw, struct sk_buff *skb) { (void)hw; kfree_skb(skb); }
 void ieee80211_tx_status_irqsafe(struct ieee80211_hw *hw, struct sk_buff *skb) { (void)hw; kfree_skb(skb); }
-void ieee80211_tx_status_ext(struct ieee80211_hw *hw, struct ieee80211_tx_status *st) { (void)hw; if (st && st->skb) kfree_skb(st->skb); }
+void ieee80211_tx_status_ext(struct ieee80211_hw *hw, struct ieee80211_tx_status *st) {
+  (void)hw; if (!st || !st->skb) return;
+  if (st->skb->protocol == cpu_to_be16(ETH_P_PAE) && g_hooks.eapol_status) g_hooks.eapol_status(!!(IEEE80211_SKB_CB(st->skb)->flags & IEEE80211_TX_STAT_ACK));
+  kfree_skb(st->skb); }
 void ieee80211_stop_queues(struct ieee80211_hw *hw) { (void)hw; }
 void ieee80211_wake_queues(struct ieee80211_hw *hw) { (void)hw; }
 int ieee80211_queue_stopped(struct ieee80211_hw *hw, int q) { (void)hw; (void)q; return 0; }
