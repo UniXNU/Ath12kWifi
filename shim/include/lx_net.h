@@ -17,7 +17,17 @@ extern struct net init_net;
 struct sock {
   void *sk_user_data; void (*sk_data_ready)(struct sock *); void (*sk_error_report)(struct sock *);
   struct list_head rx; u32 port; int reset; u32 peer_node, peer_port; int connected;
+  /* Optional native transmit-status owner; QRTR leaves these unset. */
+  bool wifi_status;
+  int pacing_shift;
+  bool (*try_hold)(struct sock *);
+  void (*put)(struct sock *);
+  void (*wifi_ack)(struct sock *, bool valid, bool acked);
 };
+static inline bool sk_requests_wifi_status(struct sock *sk) {
+  return sk && sk->wifi_status && sk->try_hold && sk->put;
+}
+static inline void sk_pacing_shift_update(struct sock *sk, int shift) { if (sk) WRITE_ONCE(sk->pacing_shift, shift); }
 struct socket { struct sock *sk; };
 int sock_create_kern(struct net *net, int family, int type, int proto, struct socket **res);
 void sock_release(struct socket *s);

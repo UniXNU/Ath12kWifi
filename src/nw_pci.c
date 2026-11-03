@@ -54,6 +54,7 @@ int pci_register_driver(struct pci_driver *drv) {
   g_drv = drv;
   memset(&g_dev, 0, sizeof g_dev);
   g_dev.vendor = 0x17cb; g_dev.device = nw_board->device_id; g_dev.dev.name = "wlan0pci"; g_dev.dev.dma_mask = 0xffffffffull;
+  device_initialize(&g_dev.dev);
   g_dev.msi_cap = nw_board->msi_cap; g_dev.bus = &g_bus;
   { u32 sub = 0; if (!nw_board->cfg_read(0x2c, 4, &sub)) { g_dev.subsystem_vendor = sub & 0xffff; g_dev.subsystem_device = sub >> 16; } }   /* the board file is picked by these */
   /* The endpoint reads host memory in the largest pieces its device control register allows: ask for the smallest (128 bytes). */

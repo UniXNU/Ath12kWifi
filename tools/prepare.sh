@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 # Lays out the generated include trees the sources are built from: out/pinned (public headers used as they are), out/ath12k-src and out/mhi-src
 # (links to the driver sources with the trace points replaced by empty ones).
 cd "$(dirname "$0")/.."
@@ -140,3 +141,10 @@ PY
 rm -f $O/dp_htt.c; sed 's/^\t\tath12k_debugfs_htt_ext_stats_handler(ab, skb);/\t\t{ extern void nw_htt_ext_stats(struct ath12k_base *, struct sk_buff *); nw_htt_ext_stats(ab, skb); }/' $A/dp_htt.c > $O/dp_htt.c
 grep -q 'nw_htt_ext_stats' $O/dp_htt.c || { echo "dp_htt.c patch missed" >&2; exit 1; }
 ln -sf $L/drivers/bus/mhi/common.h out/common.h
+python3 tools/apply-ath12k-patches.py
+python3 tools/apply-os-patches.py
+python3 tools/prepare-mac80211.py
+python3 tools/prepare-mac80211.py --subsystem cfg80211
+python3 tools/prepare-crypto.py
+python3 tools/prepare-cfg80211-native.py
+python3 tools/prepare-cfg80211-events.py

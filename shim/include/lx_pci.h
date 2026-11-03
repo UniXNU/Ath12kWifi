@@ -101,7 +101,8 @@ struct msi_desc *irq_get_msi_desc(unsigned int irq);
   static inline void ewma_##name##_init(struct ewma_##name *e) { e->internal = 0; } \
   static inline unsigned long ewma_##name##_read(struct ewma_##name *e) { return e->internal >> (p); } \
   static inline void ewma_##name##_add(struct ewma_##name *e, unsigned long v) { \
-    unsigned long c = e->internal; e->internal = c ? (((c << (w)) - c) + (v << (p))) >> (w) : (v << (p)); }
+    unsigned long c = e->internal, shift = __builtin_ctzl((unsigned long)(w)); \
+    e->internal = c ? (((c << shift) - c) + (v << (p))) >> shift : (v << (p)); }
 
 #define sizeof_field(t, m) sizeof(((t *)0)->m)
 #define PTR_ALIGN(p, a) ((__typeof__(p))ALIGN((unsigned long)(p), a))
@@ -115,6 +116,10 @@ struct msi_desc *irq_get_msi_desc(unsigned int irq);
 #define min3(a, b, c) min(min(a, b), c)
 #define max3(a, b, c) max(max(a, b), c)
 #define struct_size(p, m, n) (sizeof(*(p)) + sizeof((p)->m[0]) * (n))
+#define DEFINE_RAW_FLEX(type, name, member, count) \
+  _Static_assert(__builtin_constant_p(count), "onstack flex array requires constant count"); \
+  union { u8 bytes[sizeof(type) + sizeof(((type *)0)->member[0]) * (count)]; type obj; } name##_u = { }; \
+  type *name = (type *)&name##_u
 #define size_add(a, b) ((a) + (b))
 #define size_mul(a, b) ((a) * (b))
 #define memset_startat(p, v, m) memset((char *)(p) + __builtin_offsetof(__typeof__(*(p)), m), v, sizeof(*(p)) - __builtin_offsetof(__typeof__(*(p)), m))
@@ -158,19 +163,22 @@ static inline void lx_g_mutex_exit(struct mutex **m) { mutex_unlock(*m); }
 static inline struct mutex *lx_g_mutex_enter(struct mutex *m) { mutex_lock(m); return m; }
 static inline void lx_g_spinlock_bh_exit(spinlock_t **l) { spin_unlock_bh(*l); }
 static inline spinlock_t *lx_g_spinlock_bh_enter(spinlock_t *l) { spin_lock_bh(l); return l; }
-static inline void lx_g_rcu_exit(int *x) { (void)x; }
-static inline int lx_g_rcu_enter(void) { return 0; }
+static inline void lx_g_rcu_exit(int *x) { (void)x; lx_rcu_read_unlock(); }
+static inline int lx_g_rcu_enter(void) { lx_rcu_read_lock(); return 0; }
 #define guard(kind) for (int LX_CAT(lx_once_, __LINE__) = 0; 0;) {} LX_GUARD_##kind
+#define scoped_guard(kind, ...) \
+  for (bool LX_CAT(lx_scoped_, __LINE__) = false; !LX_CAT(lx_scoped_, __LINE__);) \
+    for (LX_GUARD_##kind(__VA_ARGS__); !LX_CAT(lx_scoped_, __LINE__) && (LX_CAT(lx_scoped_, __LINE__) = true);)
 #define LX_GUARD_mutex(m) struct mutex *LX_CAT(lx_g_, __LINE__) __attribute__((cleanup(lx_g_mutex_exit))) = lx_g_mutex_enter(m)
 #define LX_GUARD_spinlock_bh(l) spinlock_t *LX_CAT(lx_g_, __LINE__) __attribute__((cleanup(lx_g_spinlock_bh_exit))) = lx_g_spinlock_bh_enter(l)
 #define LX_GUARD_rcu() int LX_CAT(lx_g_, __LINE__) __attribute__((cleanup(lx_g_rcu_exit))) = lx_g_rcu_enter()
 struct wiphy;
-static inline void lx_g_wiphy_exit(struct wiphy **w);
-static inline struct wiphy *lx_g_wiphy_enter(struct wiphy *w);
+void lx_g_wiphy_exit(struct wiphy **w);
+struct wiphy *lx_g_wiphy_enter(struct wiphy *w);
 #define LX_GUARD_wiphy(w) struct wiphy *LX_CAT(lx_g_, __LINE__) __attribute__((cleanup(lx_g_wiphy_exit))) = lx_g_wiphy_enter(w)
 #define lockdep_assert_wiphy(w)
-#define rtnl_lock() ((void)0)
-#define rtnl_unlock() ((void)0)
+#define rtnl_lock() lx_rtnl_lock()
+#define rtnl_unlock() lx_rtnl_unlock()
 #define ASSERT_RTNL()
 
 #define SZ_512M 0x20000000
@@ -189,8 +197,6 @@ static inline struct wiphy *lx_g_wiphy_enter(struct wiphy *w);
 #define div64_u64(a, b) ((u64)(a) / (u64)(b))
 #define atomic_dec_if_positive(a) ({ int _v = atomic_read(a) - 1; if (_v >= 0) atomic_set(a, _v); _v; })
 #define rcu_read_lock_any_held() 1
-#define NETIF_F_HW_CSUM 1
-#define NETIF_F_SG 2
 struct ethhdr { u8 h_dest[6]; u8 h_source[6]; __be16 h_proto; } __packed;
 struct reserved_mem { phys_addr_t base, size; };
 struct resource { phys_addr_t start, end; };
@@ -221,7 +227,6 @@ void *lx_ioremap(phys_addr_t pa, size_t n);
 #define SET_LATE_SYSTEM_SLEEP_PM_OPS(a, b)
 #define memcpy_and_pad(d, dl, s, sl, p) do { size_t _l = (sl) < (dl) ? (sl) : (dl); memcpy(d, s, _l); if ((dl) > _l) memset((char *)(d) + _l, p, (dl) - _l); } while (0)
 static inline int list_count_nodes(struct list_head *h) { int n = 0; struct list_head *p; for (p = h->next; p != h; p = p->next) n++; return n; }
-#define cpu_to_be64(x) __builtin_bswap64(x)
 #define get_unaligned_be64(p) ({ u64 _v; memcpy(&_v, (p), 8); __builtin_bswap64(_v); })
 #define get_unaligned_le64(p) ({ u64 _v; memcpy(&_v, (p), 8); _v; })
 #define list_for_each_entry_safe_reverse(p, n, h, m) for (p = list_entry((h)->prev, __typeof__(*p), m), n = list_entry(p->m.prev, __typeof__(*p), m); &p->m != (h); p = n, n = list_entry(n->m.prev, __typeof__(*n), m))
@@ -230,7 +235,7 @@ static inline unsigned char *skb_tail_pointer(const struct sk_buff *s) { return 
 #define u8p_replace_bits(p, v, m) (*(p) = ((*(p)) & ~(m)) | ((((u8)(v)) << __builtin_ctz(m)) & (m)))
 #define u16p_replace_bits(p, v, m) (*(p) = ((*(p)) & ~(m)) | ((((u16)(v)) << __builtin_ctz(m)) & (m)))
 #define skb_queue_len_lockless(q) ((q)->qlen)
-#define synchronize_net() ((void)0)
+#define synchronize_net() synchronize_rcu()
 #define __ffs64(x) __builtin_ctzll(x)
 #define list_cut_before(a, b, e) lx_list_cut_before(a, b, e)
 static inline void lx_list_cut_before(struct list_head *dst, struct list_head *src, struct list_head *entry) {
@@ -239,12 +244,10 @@ static inline void lx_list_cut_before(struct list_head *dst, struct list_head *s
 static inline void list_splice_tail(struct list_head *l, struct list_head *h) { if (list_empty(l)) return; l->next->prev = h->prev; h->prev->next = l->next; l->prev->next = h; h->prev = l->prev; }
 static inline void list_splice(struct list_head *l, struct list_head *h) { if (list_empty(l)) return; l->prev->next = h->next; h->next->prev = l->prev; l->next->prev = h; h->next = l->next; }
 static inline void list_splice_init(struct list_head *l, struct list_head *h) { list_splice(l, h); INIT_LIST_HEAD(l); }
-#define skb_shinfo(s) ((struct skb_shared_info *)((s)->end))
-struct skb_shared_info { u8 nr_frags; u16 gso_size; struct sk_buff *frag_list; };
-#define skb_reset_mac_header(s) ((void)0)
 #define rcu_dereference_rtnl(p) (p)
 #define le32_to_cpup(p) (*(p))
 #define le16_to_cpup(p) (*(p))
+static inline u16 be16_to_cpup(const __be16 *p) { return get_unaligned_be16(p); }
 struct crypto_shash { int unused; };
 struct shash_desc { struct crypto_shash *tfm; u8 ctx[64]; };
 struct crypto_shash *crypto_alloc_shash(const char *alg, u32 type, u32 mask);
@@ -266,4 +269,5 @@ static inline struct sk_buff *skb_peek_tail(const struct sk_buff_head *q) { stru
 #define smp_processor_id() 0
 #define PCI_VDEVICE(v, d) .vendor = PCI_VENDOR_ID_##v, .device = (d), .subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID
 #define ffz(x) __builtin_ctzl(~(x))
+#include <linux/bitmap.h>
 #endif
