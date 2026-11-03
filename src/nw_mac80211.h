@@ -7,6 +7,7 @@ struct nw_wifi_hooks {
   void (*scan_done)(struct ieee80211_hw *, bool aborted);
   void (*beacon_loss)(void);
   void (*eapol_status)(bool acked);                            /* a sent handshake frame: acknowledged or not */
+  void (*rx_flush)(void);
 };
 void nw_wifi_set_hooks(const struct nw_wifi_hooks *h);
 struct ieee80211_hw *nw_wifi_hw(void);

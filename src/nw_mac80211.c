@@ -105,12 +105,15 @@ static struct sk_buff_head g_rxq; static struct work_struct g_rx_work; static in
 static void rx_work(struct work_struct *w) {
   static int seen; struct sk_buff *skb; (void)w;
   if (g_lost) { g_lost = 0; if (g_hooks.beacon_loss) g_hooks.beacon_loss(); }
-  while ((skb = skb_dequeue(&g_rxq))) {
+  for (unsigned budget = 64; budget && (skb = skb_dequeue(&g_rxq)); budget--) {
     int n = seen < 12 ? ++seen : 0;
     if (n) lx_log(6, "wifi: frame %d to the station code, %u bytes", n, skb->len);
     if (g_hooks.rx) g_hooks.rx(g_hw, skb);
     if (n) lx_log(6, "wifi: frame %d handled", n);
-    kfree_skb(skb); } }
+    kfree_skb(skb); }
+  if (g_hooks.rx_flush) g_hooks.rx_flush();
+  if (!skb_queue_empty(&g_rxq)) lx_queue_work(&g_rx_work);
+}
 unsigned nw_rx_backlog(void) { return g_rx_init ? skb_queue_len(&g_rxq) : 0; }
 unsigned nw_rx_dropped(void) { return g_rx_dropped; }
 static void rx_defer(struct sk_buff *skb) {

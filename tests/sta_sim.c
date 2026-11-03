@@ -12,6 +12,11 @@
 #include "nw_sta.h"
 
 struct nw_wifi_stats nw_wifi_stats; unsigned int ath12k_debug_mask;
+/* This fixture has no firmware rings or HTT transport; diagnostics are labels. */
+void nw_wifi_htt_stats(int type) { (void)type; }
+void nw_wifi_ring_state(char *text, int size) { snprintf(text, size, "simulated rings"); }
+void nw_wifi_rx_state(char *text, int size) { snprintf(text, size, "simulated receive"); }
+void nw_wifi_tx_reasons(char *text, int size) { snprintf(text, size, "simulated completions"); }
 static u64 g_ms; static int fails;
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL: " __VA_ARGS__); printf("\n"); fails++; } else if (getenv("V")) { printf("ok:   " __VA_ARGS__); printf("\n"); } } while (0)
 static u64 p_now(void) { return g_ms; }
@@ -92,7 +97,13 @@ static int op_setkey(struct ieee80211_hw *hw, enum set_key_cmd cmd, struct ieee8
   (void)hw; (void)v; if (cmd != SET_KEY) return 0; n_setkey++; if (k->flags & IEEE80211_KEY_FLAG_PAIRWISE) { CHECK(s != 0, "pairwise key has a station"); g_pk = k; CHECK(!memcmp(k->key, g_ptk + 32, 16), "TK equals the AP's"); }
   else { g_gk = k; CHECK(!memcmp(k->key, GTK, 16) && k->keyidx == 1, "GTK and its index arrive intact"); } return 0; }
 static void op_tx(struct ieee80211_hw *hw, struct ieee80211_tx_control *c, struct sk_buff *skb) {
-  (void)hw; (void)c; n_tx++; struct ieee80211_hdr *h = (void *)skb->data; u16 fc = le16_to_cpu(h->frame_control);
+  (void)hw; (void)c; n_tx++;
+  /* Hardware encapsulation carries Ethernet, so parse its metadata first. */
+  if (IEEE80211_SKB_CB(skb)->flags & IEEE80211_TX_CTL_HW_80211_ENCAP) {
+    CHECK(skb->len >= ETH_HLEN, "encapsulation input has an Ethernet header");
+    if (g_last_data) kfree_skb(g_last_data); g_last_data = skb; return;
+  }
+  struct ieee80211_hdr *h = (void *)skb->data; u16 fc = le16_to_cpu(h->frame_control);
   if (ieee80211_is_auth(h->frame_control)) { g_auth_seen = 1; u8 b[6] = { 0, 0, 2, 0, 0, 0 }; inject(mgmt_to_sta(IEEE80211_STYPE_AUTH, b, 6), 2437); }
   else if (ieee80211_is_assoc_req(h->frame_control)) { g_assoc_seen = 1;
     const u8 *ie = skb->data + 24 + 4; unsigned left = skb->len - 28; int ssid_ok = 0, rsn_ok = 0;
@@ -143,10 +154,10 @@ int main(void) {
   u8 eth[60]; memset(eth, 0, sizeof eth); memcpy(eth, AP, 6); memcpy(eth + 6, g_sta_mac, 6); eth[12] = 0x08; eth[13] = 0x00; memcpy(eth + 14, "payload-bytes", 13);
   nw_wifi_tx(eth, 27); spin(5);
   CHECK(g_last_data != 0, "a data frame reached the driver");
-  if (g_last_data) { struct ieee80211_hdr *h = (void *)g_last_data->data; struct ieee80211_tx_info *info = IEEE80211_SKB_CB(g_last_data);
-    CHECK(ieee80211_has_tods(h->frame_control) && ieee80211_has_protected(h->frame_control), "to-DS and protected");
+  if (g_last_data) { struct ieee80211_tx_info *info = IEEE80211_SKB_CB(g_last_data);
+    CHECK(info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP, "data uses hardware encapsulation");
     CHECK(info->control.hw_key == g_pk && info->control.vif != 0, "frame names the pairwise key and the interface");
-    CHECK(!memcmp(g_last_data->data + 26 + 8 + 6, "\x08\x00", 2) && !memcmp(g_last_data->data + 26 + 8 + 8, "payload-bytes", 13), "payload behind CCMP header and LLC"); }
+    CHECK(g_last_data->len == 27 && !memcmp(g_last_data->data, eth, 27), "encapsulation input preserves the Ethernet header and payload"); }
   /* data in */
   { struct sk_buff *skb = alloc_skb(200, 0); struct ieee80211_hdr *h = skb_put_zero(skb, 26); h->frame_control = cpu_to_le16(IEEE80211_FTYPE_DATA | IEEE80211_STYPE_QOS_DATA | IEEE80211_FCTL_FROMDS | IEEE80211_FCTL_PROTECTED);
     memcpy(h->addr1, g_sta_mac, 6); memcpy(h->addr2, AP, 6); memcpy(h->addr3, "\x02\x77\x66\x55\x44\x33", 6); u8 snap[8] = { 0xaa, 0xaa, 3, 0, 0, 0, 0x08, 0x06 }; skb_put_data(skb, snap, 8); skb_put_data(skb, "ARPDATA", 7);

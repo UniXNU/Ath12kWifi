@@ -53,6 +53,10 @@
 #define ENAMETOOLONG 63
 #define ENOTSOCK 88
 #define EADDRINUSE 98
+#define EADDRNOTAVAIL 99
+#define EILSEQ 84
+#define ERFKILL 132
+#define ESTALE 116
 #define ENOTBLK 15
 #define ELOOP 62
 #define EDEADLK 11

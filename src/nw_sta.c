@@ -8,6 +8,7 @@
 #include "nw_crypto.h"
 #include "nw_mac80211.h"
 #include "nw_sta.h"
+#include "nw_events.h"
 
 #define MAX_BSS 48
 #define IE_MAX 384
@@ -26,7 +27,6 @@ static struct bss g_bss[MAX_BSS]; static int g_nbss;
 
 static u8 g_no_bssid[6];   /* the driver compares received frames with the interface's access point address, so it is never a null pointer */
 static struct ieee80211_hw *g_hw; static const struct ieee80211_ops *g_ops; static struct ieee80211_vif *g_vif;
-static struct nw_wifi_events g_ev;
 
 enum { REQ_NONE, REQ_SCAN, REQ_CONNECT, REQ_DISCONNECT };
 static struct { int kind; u8 ssid[32]; u8 ssid_len; u8 bssid[6]; int has_bssid; char pass[65]; int pass_len; int has_pass; } g_req;
@@ -96,13 +96,13 @@ static void do_scan(const u8 *ssid, u8 len) {
   g_scan_running = 1; nw_wifi_stats.stage = 5;
   lx_log(6, "wifi: scan starts on %d channels", k);
   int r = g_ops->hw_scan(g_hw, g_vif, rq);
-  if (r) { lx_log(3, "wifi: scan request failed: %d", r); nw_wifi_stats.last_err = r; g_scan_running = 0; if (g_ev.scan_done) g_ev.scan_done(); }
+  if (r) { lx_log(3, "wifi: scan request failed: %d", r); nw_wifi_stats.last_err = r; g_scan_running = 0; if (nw_events.scan_done) nw_events.scan_done(); }
   lx_free(rq); }
 void nw_sta_scan_done(bool aborted) {
   g_scan_running = 0; nw_wifi_stats.scans++; nw_wifi_stats.stage = 6;
   lx_log(6, "wifi: scan %u finished%s, %u networks", nw_wifi_stats.scans, aborted ? " (aborted)" : "", nw_wifi_stats.bss_seen);
   if (C.state == NW_STA_SCANNING) C.state = NW_STA_IDLE;
-  if (g_ev.scan_done) g_ev.scan_done(); }
+  if (nw_events.scan_done) nw_events.scan_done(); }
 
 /* ---- element helpers ---- */
 static const u8 *find_ie(const u8 *ies, unsigned len, u8 id) { const struct element *e = cfg80211_find_elem_match(id, ies, len, 0, 0, 0); return e ? (const u8 *)e : 0; }
@@ -346,7 +346,7 @@ static void to_eth(struct sk_buff *skb) {
   unsigned plen = skb->len - hl - 8; if (plen > 2000) return;
   static u8 eth[14 + 2000]; memcpy(eth, h->addr1, 6); memcpy(eth + 6, h->addr3, 6); memcpy(eth + 12, llc + 6, 2); memcpy(eth + 14, llc + 8, plen);
   if (eth[12] == 0x88 && eth[13] == 0x8e) return;   /* EAPOL belongs to the handshake */
-  if (g_ev.rx) g_ev.rx(eth, 14 + plen); }
+  if (nw_events.rx) nw_events.rx(eth, 14 + plen); }
 
 /* ---- the handshake ---- */
 struct eapol_key { u8 ver, type, len[2]; u8 desc; u8 info[2]; u8 keylen[2]; u8 replay[8]; u8 nonce[32]; u8 iv[16]; u8 rsc[8]; u8 id[8]; u8 mic[16]; u8 datalen[2]; u8 data[]; } __attribute__((packed));
@@ -489,7 +489,7 @@ void nw_sta_rx(struct sk_buff *skb) {
   { struct ieee80211_rx_status *rs = IEEE80211_SKB_RXCB(skb);
     if (rs->flag & RX_FLAG_8023) {   /* the hardware already made an Ethernet frame of it */
       nw_wifi_stats.frames++;
-      if (skb->len >= 14 && !(skb->data[12] == 0x88 && skb->data[13] == 0x8e) && C.state >= NW_STA_KEYS && g_ev.rx) g_ev.rx(skb->data, skb->len);
+      if (skb->len >= 14 && !(skb->data[12] == 0x88 && skb->data[13] == 0x8e) && C.state >= NW_STA_KEYS && nw_events.rx) nw_events.rx(skb->data, skb->len);
       return; } }
   if (skb->len < 24) return; nw_wifi_stats.frames++;
   struct ieee80211_hdr *h = (void *)skb->data;
@@ -506,7 +506,7 @@ void nw_sta_rx(struct sk_buff *skb) {
 static void connect_done(int res) {
   C.result = res; lx_cancel_delayed(&g_timer);
   if (res != NW_RES_OK) { teardown(0, 0); C.state = NW_STA_IDLE; C.result = res; } nw_wifi_stats.last_err = -res;
-  if (g_ev.connect_done) g_ev.connect_done(res); }
+  if (nw_events.connect_done) nw_events.connect_done(res); }
 static void teardown(int notify_lost, int reason) {
   if (C.sta) {
     if (C.ptk_key) { g_ops->set_key(g_hw, DISABLE_KEY, g_vif, C.sta, C.ptk_key); lx_free(C.ptk_key); C.ptk_key = 0; }
@@ -517,7 +517,7 @@ static void teardown(int notify_lost, int reason) {
   if (C.ctx) { g_ops->unassign_vif_chanctx(g_hw, g_vif, &g_vif->bss_conf, C.ctx); g_ops->remove_chanctx(g_hw, C.ctx); RCU_INIT_POINTER(g_vif->bss_conf.chanctx_conf, NULL); nw_wifi_chanctx_set(0); lx_free(C.ctx); C.ctx = 0; }
   nw_wifi_bss_set(0, 0, 0, 0);
   g_vif->bss_conf.bssid = g_no_bssid; C.ptk_ready = 0; C.hs_stage = 0; C.have_replay = 0; C.chanctx_up = 0;
-  if (notify_lost) { C.state = NW_STA_IDLE; if (g_ev.link_lost) g_ev.link_lost(reason); } }
+  if (notify_lost) { C.state = NW_STA_IDLE; if (nw_events.link_lost) nw_events.link_lost(reason); } }
 static void timer_fn(struct work_struct *w) {
   (void)w; u64 now = lx_now_ms();
   switch (C.state) {
@@ -577,7 +577,6 @@ int nw_wifi_tx(const uint8_t *eth, size_t len) {
   lock(); if (g_txq_tail) g_txq_tail->next = it; else g_txq_head = it; g_txq_tail = it; g_txq_n++; unlock(); return 0; }
 
 /* ---- requests from the board ---- */
-void nw_wifi_set_events(const struct nw_wifi_events *ev) { g_ev = *ev; }
 int nw_wifi_scan(const uint8_t *ssid, size_t len) { lock(); g_req.kind = REQ_SCAN; g_scan_directed = len != 0; g_scan_ssid_len = len > 32 ? 32 : len; if (ssid) memcpy(g_scan_ssid, ssid, g_scan_ssid_len); unlock(); return 0; }
 int nw_wifi_connect(const uint8_t *ssid, size_t len, const uint8_t *bssid, const char *pass, size_t plen) {
   if (len > 32 || plen > 64) return -1; if (pass && plen < 8) return -1;

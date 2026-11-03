@@ -38,6 +38,7 @@ int nw_mhi_register(struct nw_mhi *n, void *bar, size_t bar_len, u32 msi_base, u
   struct mhi_controller *c = mhi_alloc_controller();
   if (!c) return -ENOMEM;
   memset(&n->dev, 0, sizeof n->dev);
+  device_initialize(&n->dev);
   n->dev.name = "wcn7850"; n->dev.drvdata = n; n->dev.dma_mask = dma_limit;
   n->c = c;
   c->cntrl_dev = &n->dev;

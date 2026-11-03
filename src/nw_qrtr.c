@@ -25,7 +25,6 @@ static nw_qrtr_xmit_fn g_xmit; static void *g_ctx;
 static int g_hello_sent;
 static u32 g_remote;      /* node id the remote announced, 0 until the first packet */
 static u32 g_next_port = 0x4000;
-struct net init_net;
 
 void nw_qrtr_init(void) { memset(g_sock, 0, sizeof g_sock); memset(g_srv, 0, sizeof g_srv); memset(g_lookup, 0, sizeof g_lookup); g_remote = 0; g_next_port = 0x4000; }
 
