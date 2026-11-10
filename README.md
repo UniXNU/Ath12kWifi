@@ -44,6 +44,9 @@ hardware offload handles ordinary traffic.
   fragments into aligned mbufs and submits batches of up to 64 frames.
 - skb clones and A-MSDU fragments share reference-counted DMA storage.
   Copy-on-write detaches writable storage. Six reuse classes cache up to 1 MiB.
+  A DMA allocation holds packet bytes only; its descriptor, reference counts
+  and fragment table are heap memory, so a board that maps the window
+  uncached pays that cost for packet bytes alone.
 - mac80211 supplies aggregation, reordering, FQ and AQL. IFF_NO_QUEUE
   enters its scheduler directly; bounded fallback queues retain busy frames.
 - NAPI rotates through contexts with a 256-packet/2 ms budget. Work dispatch
@@ -93,7 +96,7 @@ and packages it. The consuming kernel build compiles the production manifest.
 | Exact production objects and XNU imports | `python3 tools/check-mainline-link.py --build-report FILE --kernel FILE` |
 
 Host fixtures use ASan/UBSan with simulated radio operations. The lifecycle
-check releases all 287 tracked allocations. The production audit covers
+check releases all 294 tracked allocations. The production audit covers
 125 objects and 13 XNU imports, with zero missing imports or duplicate definitions.
 Run checks affected by changes and retain their reports in `out/`.
 

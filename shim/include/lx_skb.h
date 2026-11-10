@@ -173,9 +173,11 @@ int dev_queue_xmit(struct sk_buff *skb);
 void lx_netdev_tx_kick(struct net_device *dev);
 void lx_netdev_tx_stats_get(const struct net_device *dev, struct lx_netdev_tx_stats *out);
 struct rfkill;
+struct skb_shared_info;
 struct sk_buff {
   union { struct { struct sk_buff *next, *prev; }; struct list_head list; };
   u8 *head, *data, *tail, *end;
+  struct skb_shared_info *shared; /* Heap metadata of the data buffer; clones share it. */
   u32 len, data_len, truesize;
   char cb[48] __attribute__((aligned(8)));
   struct sock *sk; struct net_device *dev;
@@ -191,7 +193,8 @@ struct sk_buff {
 };
 struct skb_shared_hwtstamps { ktime_t hwtstamp; };
 /* A native DMA allocation is a refcounted page object. Its descriptor lives in
- * the allocation trailer and survives while any skb fragment references it. */
+ * the heap object that also holds the shared info and survives while any skb
+ * fragment references it. */
 struct page {
   struct rb_node node; u8 *address; size_t length, allocation_size;
   dma_addr_t bus; unsigned references;
@@ -206,14 +209,17 @@ static inline void *page_address(const struct page *page) { return page->address
 static inline struct page *skb_frag_page(const skb_frag_t *frag) { return frag->page; }
 static inline void *skb_frag_address(const skb_frag_t *frag) { return frag->page->address + frag->offset; }
 static inline unsigned skb_frag_size(const skb_frag_t *frag) { return frag->size; }
-/* Shared by clones; the DMA allocation is released by its last owner. */
+/* Shared by clones; the DMA allocation is released by its last owner. Kept in
+ * ordinary heap memory: the board may map the DMA window uncached for the CPU,
+ * so the window holds packet bytes only and no reference counts, tree nodes or
+ * fragment tables. */
 struct skb_shared_info {
   u8 nr_frags; u16 gso_size; struct sk_buff *frag_list; unsigned int dataref;
   struct skb_shared_hwtstamps hwtstamps;
   struct page owner;
   skb_frag_t frags[MAX_SKB_FRAGS];
 };
-#define skb_shinfo(s) ((struct skb_shared_info *)((s)->end))
+#define skb_shinfo(s) ((s)->shared)
 #define skb_hwtstamps(s) (&skb_shinfo(s)->hwtstamps)
 static inline bool skb_is_gso(const struct sk_buff *skb) { return skb_shinfo(skb)->gso_size != 0; }
 static inline bool skb_has_frag_list(const struct sk_buff *skb) { return skb_shinfo(skb)->frag_list != NULL; }

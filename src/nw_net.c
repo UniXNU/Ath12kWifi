@@ -17,13 +17,10 @@ bool qdisc_all_tx_empty(const struct net_device *dev) { return __atomic_load_n(&
 /* ---- packet buffers: reference-counted DMA storage and private skb metadata ---- */
 static struct nw_buffer_stats buffer_stats;
 #define BUFFER_ADD(field, n) __atomic_fetch_add(&buffer_stats.field, (u64)(n), __ATOMIC_RELAXED)
-/* Include shared metadata in page-sized classes. Rounding the data alone to
- * 8192 made a 4096-byte RX request plus headroom consume three DMA pages. */
-_Static_assert(sizeof(struct skb_shared_info) < 2048, "ordered DMA size classes");
-static const unsigned pool_capacity[] = {
-  256, 512, 1024, 2048,
-  4096 - sizeof(struct skb_shared_info), 8192 - sizeof(struct skb_shared_info)
-};
+/* A DMA allocation holds packet bytes only (its metadata is a heap object), so
+ * the classes are whole powers of two: a 2048-byte receive buffer with its
+ * headroom takes one 4096-byte page of the window. */
+static const unsigned pool_capacity[] = { 256, 512, 1024, 2048, 4096, 8192 };
 static struct page *pool[ARRAY_SIZE(pool_capacity)];
 static spinlock_t pool_lock;
 static size_t pool_limit;
@@ -34,6 +31,7 @@ static int pool_bin(size_t length) {
 static void page_free_allocation(struct page *page) {
   lx_plat->dma_free(page->allocation_size, page->address, page->bus);
   BUFFER_ADD(dma_frees, 1); BUFFER_ADD(live_dma, -1);
+  lx_free(container_of(page, struct skb_shared_info, owner));
 }
 void nw_wifi_buffer_pool_trim(void) {
   struct page *discard = NULL;
@@ -106,11 +104,12 @@ void nw_wifi_buffer_stats_get(struct nw_buffer_stats *out) {
   READ_COUNTER(pool_cached_bytes); READ_COUNTER(pool_cached_blocks);
 #undef READ_COUNTER
 }
-static u8 *buffer_alloc(unsigned int size, u8 **end) {
+/* Returns the buffer's shared info (heap) and its data range in the DMA window. */
+static struct skb_shared_info *buffer_alloc(unsigned int size, u8 **head, u8 **end) {
   const unsigned int align = __alignof__(struct skb_shared_info);
   if (size > UINT_MAX - sizeof(struct skb_shared_info) - sizeof(struct sk_buff) - (align - 1)) { BUFFER_ADD(allocation_failures, 1); return 0; }
   size = ALIGN(size, align);
-  u64 bus = 0; u8 *b = NULL;
+  u64 bus = 0; u8 *b = NULL; struct skb_shared_info *sh = NULL;
   spin_lock(&pool_lock);
   if (pool_limit) {
     for (unsigned i = 0; i < ARRAY_SIZE(pool_capacity); i++) if (size <= pool_capacity[i]) {
@@ -118,6 +117,7 @@ static u8 *buffer_alloc(unsigned int size, u8 **end) {
       struct page *page = pool[i];
       if (page) {
         pool[i] = page->pool_next; b = page->address; bus = page->bus;
+        sh = container_of(page, struct skb_shared_info, owner);
         BUFFER_ADD(pool_cached_bytes, -page->allocation_size); BUFFER_ADD(pool_cached_blocks, -1);
         BUFFER_ADD(pool_hits, 1);
       } else BUFFER_ADD(pool_misses, 1);
@@ -125,18 +125,20 @@ static u8 *buffer_alloc(unsigned int size, u8 **end) {
     }
   }
   spin_unlock(&pool_lock);
-  bool reused = b != NULL;
-  if (!b) b = lx_plat->dma_alloc((size_t)size + sizeof(struct skb_shared_info), &bus);
-  if (!b) {
-    /* Cached blocks in another size class must not prevent live allocations. */
-    nw_wifi_buffer_pool_trim();
-    b = lx_plat->dma_alloc((size_t)size + sizeof(struct skb_shared_info), &bus);
+  bool reused = sh != NULL;
+  if (!sh) {
+    sh = lx_alloc(sizeof(*sh), 0);
+    if (!sh) { BUFFER_ADD(allocation_failures, 1); return 0; }
+    b = lx_plat->dma_alloc(size, &bus);
+    if (!b) {
+      /* Cached blocks in another size class must not prevent live allocations. */
+      nw_wifi_buffer_pool_trim();
+      b = lx_plat->dma_alloc(size, &bus);
+    }
+    if (!b) { lx_free(sh); BUFFER_ADD(allocation_failures, 1); return 0; }
   }
-  if (!b) { BUFFER_ADD(allocation_failures, 1); return 0; }
-  *end = b + size;
-  struct skb_shared_info *sh = (void *)*end;
   memset(sh, 0, offsetof(struct skb_shared_info, frags)); sh->dataref = 1;
-  sh->owner.address = b; sh->owner.length = size; sh->owner.allocation_size = (size_t)size + sizeof(*sh);
+  sh->owner.address = b; sh->owner.length = size; sh->owner.allocation_size = size;
   sh->owner.bus = bus; sh->owner.references = 1; page_register(&sh->owner);
   if (!reused) {
     BUFFER_ADD(dma_allocations, 1);
@@ -145,10 +147,9 @@ static u8 *buffer_alloc(unsigned int size, u8 **end) {
     while (live > peak && !__atomic_compare_exchange_n(&buffer_stats.peak_dma, &peak, live, 1,
                                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) { }
   }
-  return b;
+  *head = b; *end = b + size; return sh;
 }
-static void buffer_release(u8 *head, u8 *end) {
-  struct skb_shared_info *sh = (void *)end;
+static void buffer_release(struct skb_shared_info *sh) {
   if (__atomic_fetch_sub(&sh->dataref, 1u, __ATOMIC_ACQ_REL) != 1) return;
   for (unsigned i = 0; i < sh->nr_frags; i++) put_page(sh->frags[i].page);
   struct sk_buff *frag = sh->frag_list;
@@ -158,8 +159,8 @@ static void buffer_release(u8 *head, u8 *end) {
 struct sk_buff *alloc_skb(unsigned int size, gfp_t f) {
   (void)f; struct sk_buff *s = lx_alloc(sizeof *s, 1);
   if (!s) { BUFFER_ADD(allocation_failures, 1); return 0; }
-  u8 *b = buffer_alloc(size, &s->end);
-  if (!b) { lx_free(s); return 0; }
+  u8 *b; s->shared = buffer_alloc(size, &b, &s->end);
+  if (!s->shared) { lx_free(s); return 0; }
   s->head = s->data = s->tail = b; s->truesize = (u32)(s->end - b + sizeof(*s) + sizeof(struct skb_shared_info));
   s->users = 1; s->mac_header = (u16)~0u; s->head_frag = true;
   BUFFER_ADD(skb_allocations, 1); return s;
@@ -169,7 +170,7 @@ void kfree_skb(struct sk_buff *s) {
   if (!s) return;
   if (__atomic_fetch_sub(&s->users, 1u, __ATOMIC_ACQ_REL) != 1) return;
   skb_orphan(s);
-  buffer_release(s->head, s->end); lx_free(s); BUFFER_ADD(skb_frees, 1);
+  buffer_release(s->shared); lx_free(s); BUFFER_ADD(skb_frees, 1);
 }
 void kfree_skb_list(struct sk_buff *s) {
   while (s) { struct sk_buff *next = s->next; kfree_skb(s); s = next; }
@@ -212,13 +213,13 @@ static int copy_packet(const struct sk_buff *s, u8 *dst, unsigned int depth) {
 static int copy_layout(const struct sk_buff *s, unsigned int h, unsigned int t, struct sk_buff *n) {
   if ((u64)h + s->len + t > (u32)~0u) return -ENOMEM;
   *n = *s;
-  u8 *b = buffer_alloc(h + s->len + t, &n->end); if (!b) return -ENOMEM;
+  u8 *b; struct skb_shared_info *sh = buffer_alloc(h + s->len + t, &b, &n->end); if (!sh) return -ENOMEM;
   const unsigned int old_h = skb_headroom(s), keep = h < old_h ? h : old_h;
   buffer_copy(b + h - keep, s->data - keep, keep);
   int r = copy_packet(s, b + h, 0);
-  if (r) { buffer_release(b, n->end); return r; }
-  ((struct skb_shared_info *)n->end)->gso_size = skb_shinfo(s)->gso_size;
-  skb_shinfo(n)->hwtstamps = skb_shinfo(s)->hwtstamps;
+  if (r) { buffer_release(sh); return r; }
+  sh->gso_size = skb_shinfo(s)->gso_size; sh->hwtstamps = skb_shinfo(s)->hwtstamps;
+  n->shared = sh;
   n->head = b; n->data = b + h; n->tail = n->data + s->len;
   n->data_len = 0; n->truesize = (u32)(n->end - b + sizeof(*n) + sizeof(struct skb_shared_info)); n->cloned = 0; n->head_frag = true;
   n->network_header = s->network_header + h - old_h;
@@ -271,7 +272,7 @@ int pskb_expand_head(struct sk_buff *s, int a, int b, gfp_t f) {
   if (h > (u32)~0u || t > (u32)~0u) return -ENOMEM;
   const int shared = skb_cloned(s);
   struct sk_buff next; int r = copy_layout(s, h, t, &next); if (r) return r;
-  buffer_release(s->head, s->end); *s = next;
+  buffer_release(s->shared); *s = next;
   BUFFER_ADD(expansions, 1); if (shared) BUFFER_ADD(cow, 1); return 0;
 }
 int skb_linearize(struct sk_buff *s) { return s->data_len ? pskb_expand_head(s, 0, 0, 0) : 0; }

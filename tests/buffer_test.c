@@ -465,11 +465,17 @@ static void dma_pool_reuse(void) {
   struct sk_buff *rx = __dev_alloc_skb(4096, GFP_ATOMIC); assert(rx);
   struct page *owner = &skb_shinfo(rx)->owner;
   assert(skb_tailroom(rx) >= 4096 && owner->allocation_size == 8192);
+  /* The DMA allocation holds packet bytes only: its descriptor and the shared info are heap memory. */
+  assert((u8 *)skb_shinfo(rx) + sizeof(struct skb_shared_info) <= owner->address || (u8 *)skb_shinfo(rx) >= owner->address + owner->allocation_size);
+  assert(rx->end == owner->address + owner->allocation_size && owner->length == owner->allocation_size);
   void *rx_head = rx->head; kfree_skb(rx);
   rx = __dev_alloc_skb(4096, GFP_ATOMIC); assert(rx && rx->head == rx_head);
+  kfree_skb(rx);
+  /* The driver's receive buffer (2048 bytes, 128 of alignment room, 32 reserved) takes one 4096-byte page. */
+  rx = __dev_alloc_skb(2048 + 128, GFP_ATOMIC); assert(rx && skb_shinfo(rx)->owner.allocation_size == 4096);
   kfree_skb(rx); nw_wifi_buffer_pool_configure(0);
-  puts("DMA RX classes: 4096-byte receive buffer plus headroom/metadata fits 8192 bytes and reuses its allocation");
-  nw_wifi_buffer_pool_configure(4096);
+  puts("DMA RX classes: 4096-byte receive buffer plus headroom fits 8192 bytes, a 2048-byte one fits 4096, metadata stays in heap memory and allocations are reused");
+  nw_wifi_buffer_pool_configure(2048); /* room for one cached 1500-byte packet buffer */
   struct nw_buffer_stats before, after; nw_wifi_buffer_stats_get(&before);
   void *first_head = NULL;
   for (unsigned i = 0; i < 4096; i++) {
@@ -481,12 +487,12 @@ static void dma_pool_reuse(void) {
   }
   nw_wifi_buffer_stats_get(&after);
   assert(after.dma_allocations - before.dma_allocations == 1 && after.pool_hits - before.pool_hits == 4095);
-  assert(after.pool_cached_blocks == 1 && after.pool_cached_bytes <= 4096);
+  assert(after.pool_cached_blocks == 1 && after.pool_cached_bytes == 2048);
   struct sk_buff *packet = alloc_skb(1500, GFP_ATOMIC), *clone = skb_clone(packet, GFP_ATOMIC); assert(packet && clone);
   kfree_skb(packet); nw_wifi_buffer_stats_get(&after); assert(!after.pool_cached_blocks);
   struct sk_buff *other = alloc_skb(1500, GFP_ATOMIC); assert(other && other->head != clone->head);
   kfree_skb(other); kfree_skb(clone);
-  nw_wifi_buffer_stats_get(&after); assert(after.pool_cached_blocks == 1 && after.pool_cached_bytes <= 4096);
+  nw_wifi_buffer_stats_get(&after); assert(after.pool_cached_blocks == 1 && after.pool_cached_bytes == 2048);
   fail_dma = 1; assert(!alloc_skb(700, GFP_ATOMIC)); fail_dma = 0;
   nw_wifi_buffer_stats_get(&after); assert(!after.pool_cached_blocks && !after.pool_cached_bytes);
   nw_wifi_buffer_pool_configure(16384);
