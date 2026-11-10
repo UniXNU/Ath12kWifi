@@ -60,6 +60,15 @@ hardware offload handles ordinary traffic.
 `nw_wifi_link_state` reads cached PHY rate, MCS, stream count, bandwidth and RSSI.
 Both use existing driver state without firmware statistics requests.
 
+While joined, the worker logs the driver's receive counters every 30 s in
+which frames arrived: `wifi: rx reo ...` (frames per destination ring,
+exception and error pushes by code; `reo0` counts frames delivered without
+a reorder queue) and `wifi: rx rings ...` (free refill entries, waiting
+entries, frames dropped at the boundary). With `nw_board.diagnostics` set
+and at least 20000 frames in that time it also requests the firmware's
+receive statistics, at most once in two minutes, logged as
+`wifi: fw stats t<tag>: <word>=<value>`.
+
 ## sheng integration
 
 WifiProbe owns power, PCIe, MSI and the 128 MiB WCN7850 DMA window. WifiNet

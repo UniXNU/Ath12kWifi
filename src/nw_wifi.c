@@ -164,17 +164,18 @@ void nw_wifi_rx_state(char *b, int n) {
   if (o < n) o += snprintf(b + o, n - o, " err %u push", st->err_ring_pkts); for (int i = 0; i < 4 && o < n; i++) o += snprintf(b + o, n - o, " %u", st->hal_reo_error[i]);
   for (int i = 0; i < HAL_REO_ENTR_RING_RXDMA_ECODE_MAX && o < n; i++) if (st->rxdma_error[i]) o += snprintf(b + o, n - o, " dma%d=%u", i, st->rxdma_error[i]);
   for (int i = 0; i < HAL_REO_DEST_RING_ERROR_CODE_MAX && o < n; i++) if (st->reo_error[i]) o += snprintf(b + o, n - o, " reo%d=%u", i, st->reo_error[i]);
-  { struct hal_srng *s = &ab->hal.srng_list[dp->rx_refill_buf_ring.refill_buf_ring.ring_id]; spin_lock_bh(&s->lock);
-    int f = ath12k_hal_srng_src_num_free(ab, s, true); spin_unlock_bh(&s->lock); if (o < n) o += snprintf(b + o, n - o, "; refill free %d; waiting", f); }
+  { int f = ring_count(ab, &dp->rx_refill_buf_ring.refill_buf_ring, 0); if (o < n) o += snprintf(b + o, n - o, "; refill free %d; waiting", f); }
   for (int i = 0; i < 4 && o < n; i++) { if (!dp->reo_dst_ring[i].vaddr) continue; struct hal_srng *s = &ab->hal.srng_list[dp->reo_dst_ring[i].ring_id];
     spin_lock_bh(&s->lock); int w = ath12k_hal_srng_dst_num_free(ab, s, true); spin_unlock_bh(&s->lock); o += snprintf(b + o, n - o, " %d", w); }
   if (o < n) snprintf(b + o, n - o, "; queued %u, dropped %u", nw_rx_backlog(), nw_rx_dropped()); }
-/* The firmware's own transmit statistics (HTT extended stats): asked for on demand, every block of the answer is logged with its non-zero words. */
+/* The firmware's own statistics (HTT extended stats; 2 is the radio's receive side): asked for on demand, every block of the answer is
+ * logged with its non-zero words. */
 void nw_wifi_htt_stats(int type) {
   if (!g_hw) return;
   struct ath12k *ar = ath12k_ah_to_ar(g_hw->priv, 0); struct htt_ext_stats_cfg_params cfg = {};
   int r = ath12k_dp_tx_htt_h2t_ext_stats_req(ar, type, &cfg, (u64)ATH12K_HTT_STATS_MAGIC_VALUE << 32);
   lx_log(6, "wifi: firmware statistics %d requested: %d", type, r); }
+/* One line per run of non-zero words, "index=value", each line short enough for a board log that keeps about 100 characters of a line. */
 void nw_htt_ext_stats(struct ath12k_base *ab, struct sk_buff *skb) {
   (void)ab; const struct ath12k_htt_extd_stats_msg *m = (const void *)skb->data;
   if (skb->len < sizeof *m) return;
@@ -183,9 +184,14 @@ void nw_htt_ext_stats(struct ath12k_base *ab, struct sk_buff *skb) {
   const u8 *p = m->data, *end = m->data + len;
   while (p + 4 <= end) {
     u32 h = get_unaligned_le32(p); u16 tag = h & 0xfff, tl = (h >> 12) & 0xfff; p += 4; if (p + tl > end) break;
-    char b[240]; int o = snprintf(b, sizeof b, "wifi: firmware stats tag %u:", tag), any = 0;
-    for (unsigned i = 0; i + 4 <= tl && o < (int)sizeof b - 12; i += 4) { u32 v = get_unaligned_le32(p + i); if (v) { o += snprintf(b + o, sizeof b - o, " %u=%u", i / 4, v); any = 1; } }
-    if (any) lx_log(6, "%s", b);
+    char b[96]; int o = 0;
+    for (unsigned i = 0; i + 4 <= tl; i += 4) {
+      u32 v = get_unaligned_le32(p + i); if (!v) continue;
+      if (!o) o = snprintf(b, sizeof b, "wifi: fw stats t%u:", tag);
+      o += snprintf(b + o, sizeof b - o, " %u=%u", i / 4, v);
+      if (o > (int)sizeof b - 18) { lx_log(6, "%s", b); o = 0; }
+    }
+    if (o) lx_log(6, "%s", b);
     p += tl; } }
 static void log_tap(int level, const char *line) {
   static int done; (void)level;
@@ -249,6 +255,33 @@ int nw_wifi_start(const struct lx_platform *p, const struct nw_board *b) {
 fail:
   nw_wifi_stats.last_err = r; nw_wifi_stop(); lx_log(3, "wifi: driver start failed: %d", r); return r;
 }
+/* A counter line of any length as log lines of at most 80 characters after the prefix, broken at spaces (a board log keeps about
+ * 100 characters of a line). */
+static void log_counters(const char *prefix, const char *text) {
+  while (*text == ' ') text++;
+  while (*text) {
+    size_t n = strlen(text);
+    if (n > 80) { n = 80; while (n > 1 && text[n] != ' ') n--; }
+    lx_log(6, "%s %.*s", prefix, (int)n, text);
+    text += n; while (*text == ' ') text++;
+  }
+}
+/* Every 30 s while joined, when frames arrived since the last time: the driver's receive counters (frames per destination ring, error
+ * pushes by code, where reo0 counts frames that came without a reorder queue; then the free refill entries, the entries waiting and
+ * the frames dropped at the boundary). With the board's diagnostics on and at least 20000 frames in that time the firmware's receive
+ * statistics are asked for as well, at most once in two minutes; their answer is logged when it comes. */
+static void receive_report(void) {
+  static u64 next, next_firmware; static unsigned reported;
+  u64 now = lx_now_ms(); if (now < next) return;
+  next = now + 30000;
+  struct nw_wifi_status state; nw_wifi_status_get(&state);
+  unsigned frames = nw_wifi_stats.frames, moved = frames - reported; reported = frames;
+  if (state.state != NW_STA_UP || !moved) return;
+  char text[240]; nw_wifi_rx_state(text, sizeof text);
+  char *rings = strchr(text, ';'); if (rings) *rings++ = 0;
+  log_counters("wifi: rx", text); if (rings) log_counters("wifi: rx rings", rings);
+  if (nw_board && nw_board->diagnostics && moved >= 20000 && now >= next_firmware) { next_firmware = now + 120000; nw_wifi_htt_stats(2); }
+}
 /* Returns nonzero while traffic moves (frames arrived or frames wait to be sent): the board then calls again at once instead of sleeping.
  * lx_pump's own result is no guide, every handler is offered a look on each call. */
 int nw_wifi_step(void) {
@@ -257,6 +290,7 @@ int nw_wifi_step(void) {
   if (g_hw && lx_now_ms() >= next_signal) {
     next_signal = lx_now_ms() + 1000;
     char link[128]; nw_wifi_link_state(link, sizeof(link));
+    receive_report();
   }
   const unsigned f = nw_wifi_stats.frames; const int moved = f != last_frames; last_frames = f;
   return moved || nw_mainline_pending() || nw_wifi_control_pending() || lx_next_wait_ms(1000) == 0; }

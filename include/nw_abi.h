@@ -32,6 +32,7 @@ struct nw_board {
   int (*cfg_write)(int off, int size, uint32_t v);
   int (*msi_target)(uint32_t *lo, uint32_t *hi, uint32_t *data);   /* where the endpoint writes to raise vector 0 */
   void *(*map_phys)(uint64_t pa, size_t n);
+  unsigned diagnostics;                              /* nonzero: also ask the firmware for its receive statistics while frames arrive */
 };
 struct nw_wifi_stats { uint32_t stage, scans, frames, beacons, bss_seen; int last_err; };
 /* Cumulative buffer counters; snapshots do not reset live ownership counts. */
