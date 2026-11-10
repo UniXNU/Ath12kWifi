@@ -10,7 +10,7 @@ import subprocess
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--target", choices=("host", "ios"), default="ios")
+parser.add_argument("--target", choices=("host", "ios", "macos"), default="ios")
 parser.add_argument("--jobs", type=int, default=8)
 args = parser.parse_args()
 subprocess.run(["python3", str(root / "tools/prepare-supplicant.py")], check=True)
@@ -23,9 +23,10 @@ flags = ["-O2", "-g", "-Wall", "-MMD", "-Werror=implicit-function-declaration",
          "-I" + str(root / "include"), "-I" + str(root / "userspace"),
          "-I" + str(root / "out/wpa-src/wpa_supplicant")]
 link = []
-if args.target == "ios":
-    sdk = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], text=True).strip()
-    link = ["-target", "arm64e-apple-ios27.0", "-isysroot", sdk]
+if args.target in ("ios", "macos"):
+    sdk = subprocess.check_output(["xcrun", "--sdk", "iphoneos" if args.target == "ios" else "macosx", "--show-sdk-path"],
+                                  text=True).strip()
+    link = ["-target", "arm64e-apple-ios27.0" if args.target == "ios" else "arm64e-apple-macos27.0", "-isysroot", sdk]
     flags += link
 command = ["make", f"-j{args.jobs}", "wpa_supplicant", "V=1", f"CC={compiler}",
            f"BUILDDIR={output}", f"EXTRA_CFLAGS={shlex.join(flags)}", f"LDFLAGS={shlex.join(link)}"]
