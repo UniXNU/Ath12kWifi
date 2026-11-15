@@ -26,7 +26,7 @@ def resolve(name, source, check_only):
     revision = git(directory, "rev-parse", "HEAD")
     if revision != source["commit"]:
         raise SystemExit(f"{name}: expected {source['commit']}, found {revision}; preserve the existing checkout and select the locked source")
-    paths = [path.lstrip("/") for path in source["paths"]]
+    paths = [path.strip("/") for path in source["paths"]]
     # Some hosts have case-folding changes in unrelated kernel headers; only
     # imported source directories participate in this component's identity.
     changed = git(directory, "diff", "--name-only", "HEAD", "--", *paths).splitlines()
@@ -37,7 +37,7 @@ def resolve(name, source, check_only):
     if missing and check_only:
         raise SystemExit(f"{name}: missing sparse paths: {', '.join(missing)}; run tools/fetch-sources.sh")
     if not check_only:
-        subprocess.run(["git", "-C", str(directory), "sparse-checkout", "add", *source["paths"]], check=True)
+        subprocess.run(["git", "-C", str(directory), "sparse-checkout", "add", "--skip-checks", *paths], check=True)
     hashes = {path: hashlib.sha256((directory / path).read_bytes()).hexdigest()
               for path in source["required"]}
     return {"revision": revision, "files_sha256": hashes}
