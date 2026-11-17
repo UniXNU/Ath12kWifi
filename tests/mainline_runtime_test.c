@@ -272,34 +272,58 @@ static void hear(const u8 *bssid) {
                                                  elements, sizeof(elements), 0, GFP_KERNEL);
   assert(bss); cfg80211_put_bss(wiphy, bss);
 }
-static u32 held_age(const u8 *bssid) {
+static bool held(const u8 *bssid, u32 *age) {
   struct nw_bss_info info;
-  for (int i = 0; i < nw_wifi_bss_count(); i++) { assert(!nw_wifi_bss_get(i, &info)); if (!memcmp(info.bssid, bssid, ETH_ALEN)) return info.age_ms; }
-  assert(!"the network is held"); return 0;
+  for (int i = 0; i < nw_wifi_bss_count(); i++) {
+    assert(!nw_wifi_bss_get(i, &info)); if (memcmp(info.bssid, bssid, ETH_ALEN)) continue;
+    if (age) *age = info.age_ms; return true;
+  }
+  return false;
 }
+static u32 held_age(const u8 *bssid) { u32 age = 0; assert(held(bssid, &age)); return age; }
 static void held_age_is_taken_at_the_read(void) {
   const u8 near[] = {2, 9, 9, 9, 9, 1}, before_sleep[] = {2, 9, 9, 9, 9, 2};
   pass(1); hear(near);
   pass(3000); event(NW_CONTROL_SCAN_DONE, 0, NULL);
   assert(held_age(near) == 3000);
   ticks += 5000; assert(held_age(near) == 8000);    /* no scan since: it is still 5 s older */
-  asleep += 60000; assert(held_age(near) == 68000); /* nor does the sleep leave it as it was */
+  asleep += 20000; assert(held_age(near) == 28000); /* nor does the sleep leave it as it was */
   /* Heard, then asleep, then listed: the sleep lies between the frame and the list. */
   pass(1000); hear(before_sleep);
-  pass(500); asleep += 120000; pass(2000);
+  pass(500); asleep += 30000; pass(2000);
   event(NW_CONTROL_SCAN_DONE, 0, NULL);
-  assert(held_age(before_sleep) == 122500 && held_age(near) == 191500);
+  assert(held_age(before_sleep) == 32500 && held_age(near) == 61500);
   /* The joined network is heard for as long as the link is up: mac80211 ends the link when its beacons stop. */
   lx_shared_spin_lock(&boundary_lock); memcpy(status.bssid, near, ETH_ALEN); status.state = NW_STA_UP; lx_shared_spin_unlock(&boundary_lock);
-  ticks += 40000; assert(!held_age(near) && held_age(before_sleep) == 162500);
+  ticks += 40000; assert(!held_age(near) && held_age(before_sleep) == 72500);
   lx_shared_spin_lock(&boundary_lock); clear_connection(NW_STA_IDLE); lx_shared_spin_unlock(&boundary_lock);
-  assert(held_age(near) == 231500);
+  assert(held_age(near) == 101500);
   /* More wakes than are kept between the frame and the list: the sleeps of the kept wakes count, the ones before them do not. */
   const u8 many_wakes[] = {2, 9, 9, 9, 9, 3};
   pass(100); hear(many_wakes);
   for (unsigned i = 0; i < WAKES_MAX + 3; i++) { asleep += 10000; pass(100); }
   event(NW_CONTROL_SCAN_DONE, 0, NULL);
   assert(held_age(many_wakes) == (WAKES_MAX + 3) * 100 + WAKES_MAX * 10000);
+}
+/* cfg80211 keeps every network it has heard, the oldest first, and the list has 128 places: a network not heard for two
+ * minutes when the scan ends is left out, so the ones in range find a place. The joined network always has one. */
+static void held_list_leaves_out_long_unheard(void) {
+  const u8 gone[] = {2, 8, 8, 8, 8, 1}, joined[] = {2, 8, 8, 8, 8, 2}, here[] = {2, 8, 8, 8, 8, 3};
+  pass(1); hear(gone); hear(joined);
+  asleep += HELD_MS; pass(1000); hear(here);
+  event(NW_CONTROL_SCAN_DONE, 0, NULL);
+  assert(!held(gone, NULL) && !held(joined, NULL) && held_age(here) == 0 && nw_wifi_bss_count() == 1);
+  lx_shared_spin_lock(&boundary_lock); memcpy(status.bssid, joined, ETH_ALEN); status.state = NW_STA_UP; lx_shared_spin_unlock(&boundary_lock);
+  event(NW_CONTROL_SCAN_DONE, 0, NULL);
+  assert(!held(gone, NULL) && held(joined, NULL) && held(here, NULL) && nw_wifi_bss_count() == 2);
+  /* More networks in range than places, the joined one heard last of all: it takes the last place. */
+  const u8 late[] = {2, 8, 8, 8, 8, 4}; u8 crowd[ETH_ALEN] = {2, 7, 7, 7, 0, 0};
+  for (unsigned i = 0; i < UI_BSS_MAX + 4; i++) { crowd[4] = i >> 8; crowd[5] = i; hear(crowd); }
+  hear(late);
+  lx_shared_spin_lock(&boundary_lock); memcpy(status.bssid, late, ETH_ALEN); lx_shared_spin_unlock(&boundary_lock);
+  event(NW_CONTROL_SCAN_DONE, 0, NULL);
+  assert(nw_wifi_bss_count() == UI_BSS_MAX && held(late, NULL));
+  lx_shared_spin_lock(&boundary_lock); clear_connection(NW_STA_IDLE); lx_shared_spin_unlock(&boundary_lock);
 }
 int main(void) {
   lx_plat = &platform; lx_root_init();
@@ -327,7 +351,7 @@ int main(void) {
   assert(!nw_cfg80211_set_power(1)); assert(netif_running(dev) && interfaces == 1 && starts == 2);
   data_boundary(dev); power_and_scan_ordering(dev); join_channel_hint(); join_completion_and_signal(); notification_boundary(dev);
   scan_frequencies_reach_the_supplicant();
-  held_age_is_taken_at_the_read();
+  held_age_is_taken_at_the_read(); held_list_leaves_out_long_unheard();
   nw_mainline_shutdown(); ieee80211_unregister_hw(expected_hw); ieee80211_free_hw(expected_hw);
   lx_exit_ieee80211_exit(); lx_exit_cfg80211_exit();
   for (unsigned i = 0; i < 10; i++) { lx_pump(); ticks++; }

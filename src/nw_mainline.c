@@ -14,7 +14,10 @@ static struct nw_bss_info *bsses;
 static unsigned bss_count, rx_drops;
 /* When each held network was last heard, in ms of the clock that counts sleep: its age is taken from this at the read.
  * cfg80211 stamps a frame with jiffies, which stand still while the system sleeps. The lead of the sleep-counting clock
- * over jiffies is kept for the last few wakes, so a frame from before a sleep is as old as that sleep and more. */
+ * over jiffies is kept for the last few wakes, so a frame from before a sleep is as old as that sleep and more.
+ * cfg80211 keeps every network it has heard, the oldest first; one not heard for HELD_MS when a scan ends is not held,
+ * so the networks in range find a place among the UI_BSS_MAX. */
+#define HELD_MS 120000
 #define WAKES_MAX 8
 #define WAKE_LEAD_MS 1000 /* the two clocks are read one after the other; less than this is not a sleep */
 static u64 bss_heard[UI_BSS_MAX];
@@ -67,16 +70,20 @@ static void scan_snapshot(struct net_device *dev) {
   struct cfg80211_internal_bss *entry;
   rcu_read_lock(); spin_lock_bh(&rdev->bss_lock); lx_shared_spin_lock(&boundary_lock);
   bss_count = 0;
+  u64 now = lx_boottime_ns() / 1000000ULL;
   list_for_each_entry(entry, &rdev->bss_list, list) {
-    if (bss_count == UI_BSS_MAX) break;
     const struct cfg80211_bss_ies *ies = rcu_dereference(entry->pub.ies);
     if (!ies || !entry->pub.channel) continue;
-    struct nw_bss_info *out = &bsses[bss_count++]; memset(out, 0, sizeof(*out));
+    /* The joined network always has a place: the last one when the list is full. */
+    bool joined = status.state >= NW_STA_AUTH && ether_addr_equal(entry->pub.bssid, status.bssid);
+    u64 heard = heard_at(entry->ts);
+    if (!joined && (bss_count == UI_BSS_MAX || (now > heard && now - heard > HELD_MS))) continue;
+    unsigned place = bss_count == UI_BSS_MAX ? UI_BSS_MAX - 1 : bss_count++;
+    struct nw_bss_info *out = &bsses[place]; memset(out, 0, sizeof(*out)); bss_heard[place] = heard;
     memcpy(out->bssid, entry->pub.bssid, ETH_ALEN);
     out->freq_mhz = entry->pub.channel->center_freq;
     out->signal_dbm = rdev->wiphy.signal_type == CFG80211_SIGNAL_TYPE_MBM ? entry->pub.signal / 100 : entry->pub.signal;
     out->caps = entry->pub.capability; out->beacon_int = entry->pub.beacon_interval;
-    bss_heard[bss_count - 1] = heard_at(entry->ts);
     out->ie_len = min_t(size_t, ies->len, sizeof(out->ie)); memcpy(out->ie, ies->data, out->ie_len);
     const struct element *ssid = cfg80211_find_elem(WLAN_EID_SSID, ies->data, ies->len);
     if (ssid && ssid->datalen <= 32) { out->ssid_len = ssid->datalen; memcpy(out->ssid, ssid->data, ssid->datalen); }

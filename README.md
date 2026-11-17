@@ -60,7 +60,9 @@ hardware offload handles ordinary traffic.
 `nw_wifi_link_state` reads cached PHY rate, MCS, stream count, bandwidth and RSSI.
 Both use existing driver state without firmware statistics requests.
 
-`nw_wifi_bss_get` reads the list taken when the last scan ended. `age_ms` is
+`nw_wifi_bss_get` reads the list taken when the last scan ended: up to 128
+networks heard within the two minutes before, and always the joined one.
+`age_ms` is
 the time since the network was last heard as of the read, on the board's
 `boottime_ns` clock, so it grows between scans and across system sleep; the
 joined network reads 0 while the link is up. A board that answers from the
