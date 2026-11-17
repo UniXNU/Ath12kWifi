@@ -29,6 +29,13 @@ machine to this endpoint. Settings supplies profiles through ADD/SET/
 SELECT_NETWORK. The active profile lives in RAM; saved credentials come
 from the OS. Supported profiles are open and WPA2-PSK with PMF.
 
+`nw_wifi_scan_frequencies` carries up to 32 requested MHz frequencies through
+the native endpoint to the supplicant. `nw_wifi_scan` requests every band.
+
+`nw_wifi_bss_get` computes each held network's age at the read using the board's
+clock that includes sleep. The joined network reports age zero; snapshots omit
+networks unheard for two minutes and retain the joined network when full.
+
 Each accepted join has a 30-second deadline. Cancellation completes a
 pending request once; success follows port authorization. Association RSSI
 comes from the returned BSS. The worker refreshes cached peer RSSI once per
