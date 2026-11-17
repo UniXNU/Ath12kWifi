@@ -107,6 +107,18 @@ int nw_supplicant_request(void *context, const struct nw_control_view *event)
       char hex[65], text[80]; wpa_snprintf_hex(hex, sizeof(hex), ssid, length);
       os_snprintf(text, sizeof(text), "SCAN ssid %s", hex); result = command(supplicant, text, 0);
     } else result = fixed_command(supplicant, "SCAN");
+    /* The channels the UI asked for (at most 32, as the kernel limits them): a scan of every band takes about 16 s on WCN7850,
+     * longer than the UI waits for it. "SCAN freq=" maps the list through the driver's channel table, which this driver does not
+     * report, so the list goes to the manual scan the command just queued (it starts from the event loop, after this returns).
+     * A malformed list scans every band. */
+    size_t bytes; const u8 *frequencies = nw_control_get(event, NW_CONTROL_ATTR_SCAN_FREQUENCIES, &bytes);
+    if (!result && frequencies && bytes && bytes % 4 == 0 && bytes / 4 <= 32 && supplicant->scan_req == MANUAL_SCAN_REQ) {
+      int *list = os_calloc(bytes / 4 + 1, sizeof(int));
+      if (list) {
+        for (size_t i = 0; i < bytes / 4; i++) list[i] = (int)WPA_GET_LE32(frequencies + i * 4);
+        os_free(supplicant->manual_scan_freqs); supplicant->manual_scan_freqs = list;
+      }
+    }
     break;
   }
   case NW_CONTROL_POWER_REQUEST: {
