@@ -102,6 +102,7 @@ static void event(unsigned operation, int result, const struct nw_control_view *
   uint32_t value; size_t length;
   if (operation == NW_CONTROL_SCAN_DONE) {
     if (dev) scan_snapshot(dev);
+    { static unsigned said; if (++said <= 64 || result || said % 64 == 0) lx_log(6, "wifi: scan done %u: status %d, %u networks held", said, result, bss_count); }
     lx_shared_spin_lock(&boundary_lock); scan_waiting = false; if (status.state == NW_STA_SCANNING) status.state = NW_STA_IDLE; lx_shared_spin_unlock(&boundary_lock);
     nw_wifi_stats.scans++; if (nw_events.scan_done) nw_events.scan_done(); return;
   }
@@ -340,14 +341,16 @@ void nw_mainline_run(void) {
     }
   }
   struct ui_request pending;
+  unsigned expired = 0;
   lx_shared_spin_lock(&boundary_lock);
   if (scan_waiting && lx_now_ms() >= scan_deadline) {
-    scan_waiting = false; scan_ack_pending = true;
+    scan_waiting = false; scan_ack_pending = true; expired = 1 + ui.operation;
     if (ui.operation == NW_CONTROL_SCAN_REQUEST) memzero_explicit(&ui, sizeof(ui));
     if (status.state == NW_STA_SCANNING) status.state = NW_STA_IDLE;
   }
   bool scan_ack = scan_ack_pending; scan_ack_pending = false;
   pending = ui; bool power_changing = radio.pending; lx_shared_spin_unlock(&boundary_lock);
+  if (expired) { static unsigned said; if (++said <= 64 || said % 64 == 0) lx_log(6, "wifi: scan request %u unanswered after 12 s (operation %u queued)", said, expired - 1); }
   if (scan_ack && nw_events.scan_done) nw_events.scan_done();
   if (power_changing) { memzero_explicit(&pending, sizeof(pending)); nw_mainline_poll(); return; }
   if (pending.operation) {
@@ -369,6 +372,10 @@ void nw_mainline_run(void) {
       result = nw_control_put(&b, NW_CONTROL_ATTR_SSID, pending.ssid, pending.ssid_length);
     }
     if (!result) result = nw_cfg80211_event_send(&b);
+    if (pending.operation == NW_CONTROL_SCAN_REQUEST) {
+      static unsigned said;
+      if (++said <= 64 || result || said % 64 == 0) lx_log(6, "wifi: scan request %u to the supplicant: ssid %u -> %d", said, pending.ssid_length, result);
+    }
     if (!result) {
       lx_shared_spin_lock(&boundary_lock);
       if (!memcmp(&ui, &pending, sizeof(ui))) {

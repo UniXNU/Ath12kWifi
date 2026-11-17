@@ -278,7 +278,19 @@ static int request_locked(struct cfg80211_registered_device *rdev, const struct 
     int result = nw_control_put(reply, NW_CONTROL_ATTR_CHANNELS, records, at * 16);
     kfree(records); return result ? NW_CONTROL_NO_MEMORY : NW_CONTROL_OK;
   }
-  case NW_CONTROL_SCAN: return common_error(scan(rdev, request));
+  case NW_CONTROL_SCAN: {
+    /* The supplicant's scans: whether they start, and why not (a scan the radio never ended keeps scan_req and every later one busy). */
+    const bool request_held = rdev->scan_req != NULL, message_held = rdev->scan_msg != NULL;
+    const int result = scan(rdev, request);
+    static unsigned said;
+    if (++said <= 64 || result || said % 64 == 0) {
+      size_t ssid_bytes = 0, freq_bytes = 0;
+      nw_control_get(request, NW_CONTROL_ATTR_SCAN_SSIDS, &ssid_bytes); nw_control_get(request, NW_CONTROL_ATTR_SCAN_FREQUENCIES, &freq_bytes);
+      lx_log(6, "wifi: supplicant scan %u: %zu ssids, %zu frequencies -> %d (held request %d, message %d)", said, ssid_bytes / 33,
+             freq_bytes / 4, result, request_held, message_held);
+    }
+    return common_error(result);
+  }
   case NW_CONTROL_GET_BSS: return get_bss(rdev, request, reply);
   case NW_CONTROL_AUTHENTICATE: {
     int result = authenticate(rdev, request);
