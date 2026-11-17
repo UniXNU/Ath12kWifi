@@ -36,7 +36,7 @@ subprocess.run([compiler, *flags, str(root / "tests/supplicant_test.c"),
 config = out / "test.conf"
 config.write_text("ap_scan=1\n")
 output = ""
-for mode in ("wpa2", "open", "wrong"):
+for mode in ("wpa2", "open", "wrong", "scan"):
     try:
         result = subprocess.run([str(out / "supplicant-test"), str(config), mode], capture_output=True, text=True, timeout=20)
     except subprocess.TimeoutExpired as error:

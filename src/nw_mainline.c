@@ -12,7 +12,8 @@ static spinlock_t boundary_lock;
 static struct nw_wifi_status status;
 static struct nw_bss_info *bsses;
 static unsigned bss_count, rx_drops;
-struct ui_request { unsigned operation, frequency; u8 ssid[32], ssid_length, bssid[6], has_bssid; char password[64]; u8 password_length, enabled; };
+struct ui_request { unsigned operation, frequency; u8 ssid[32], ssid_length, bssid[6], has_bssid; char password[64]; u8 password_length, enabled;
+                   u32 scan_frequencies[NW_WIFI_SCAN_FREQUENCIES_MAX]; u8 scan_frequency_count; };
 static struct ui_request ui;
 static struct { bool pending, enabled; unsigned revision; } radio;
 static u64 scan_deadline;
@@ -191,14 +192,17 @@ int nw_mainline_init(void) {
   const struct nw_cfg80211_observer callbacks = { .ready = ready, .event = event }; nw_cfg80211_observe(&callbacks);
   return 0;
 }
-int nw_wifi_scan(const u8 *ssid, size_t length) {
-  if (length > 32 || (length && !ssid)) return -EINVAL;
+int nw_wifi_scan(const u8 *ssid, size_t length) { return nw_wifi_scan_frequencies(ssid, length, NULL, 0); }
+int nw_wifi_scan_frequencies(const u8 *ssid, size_t length, const u32 *mhz, size_t count) {
+  if (length > 32 || (length && !ssid) || count > NW_WIFI_SCAN_FREQUENCIES_MAX || (count && !mhz)) return -EINVAL;
+  for (size_t i = 0; i < count; i++) if (mhz[i] < 2400 || mhz[i] > 7125) return -EINVAL;
   lx_shared_spin_lock(&boundary_lock);
   if (stopping || !radio.enabled) { lx_shared_spin_unlock(&boundary_lock); return -ENETDOWN; }
   if (scan_waiting) { lx_shared_spin_unlock(&boundary_lock); return 0; } /* Coalesce duplicate UI scan requests. */
   if (!ui.operation || ui.operation == NW_CONTROL_SCAN_REQUEST) {
     memzero_explicit(&ui, sizeof(ui)); ui.operation = NW_CONTROL_SCAN_REQUEST;
     ui.ssid_length = length; if (length) memcpy(ui.ssid, ssid, length);
+    ui.scan_frequency_count = count; for (size_t i = 0; i < count; i++) ui.scan_frequencies[i] = mhz[i];
     scan_waiting = true; scan_deadline = lx_now_ms() + 12000;
   } else scan_ack_pending = true;
   lx_shared_spin_unlock(&boundary_lock); return 0;
@@ -354,7 +358,7 @@ void nw_mainline_run(void) {
   if (scan_ack && nw_events.scan_done) nw_events.scan_done();
   if (power_changing) { memzero_explicit(&pending, sizeof(pending)); nw_mainline_poll(); return; }
   if (pending.operation) {
-    u8 bytes[256]; struct nw_control_builder b;
+    u8 bytes[384]; struct nw_control_builder b;
     int result = nw_cfg80211_event_begin(&b, bytes, sizeof(bytes), pending.operation, 0);
     if (!result && pending.operation == NW_CONTROL_JOIN_REQUEST) {
       result = nw_cfg80211_begin_attempt();
@@ -368,13 +372,20 @@ void nw_mainline_run(void) {
     } else if (!result && pending.operation == NW_CONTROL_DISCONNECT_REQUEST) {
       result = nw_cfg80211_begin_attempt();
       if (!result) nw_cfg80211_event_begin(&b, bytes, sizeof(bytes), pending.operation, 0);
-    } else if (!result && pending.operation == NW_CONTROL_SCAN_REQUEST && pending.ssid_length) {
-      result = nw_control_put(&b, NW_CONTROL_ATTR_SSID, pending.ssid, pending.ssid_length);
+    } else if (!result && pending.operation == NW_CONTROL_SCAN_REQUEST) {
+      if (pending.ssid_length) result = nw_control_put(&b, NW_CONTROL_ATTR_SSID, pending.ssid, pending.ssid_length);
+      if (!result && pending.scan_frequency_count) {
+        /* The channels the UI asked for: a scan of every band takes about 16 s on WCN7850, longer than the UI waits for it. */
+        u8 frequencies[NW_WIFI_SCAN_FREQUENCIES_MAX * 4];
+        for (unsigned i = 0; i < pending.scan_frequency_count; i++) put_unaligned_le32(pending.scan_frequencies[i], frequencies + i * 4);
+        result = nw_control_put(&b, NW_CONTROL_ATTR_SCAN_FREQUENCIES, frequencies, pending.scan_frequency_count * 4u);
+      }
     }
     if (!result) result = nw_cfg80211_event_send(&b);
     if (pending.operation == NW_CONTROL_SCAN_REQUEST) {
       static unsigned said;
-      if (++said <= 64 || result || said % 64 == 0) lx_log(6, "wifi: scan request %u to the supplicant: ssid %u -> %d", said, pending.ssid_length, result);
+      if (++said <= 64 || result || said % 64 == 0)
+        lx_log(6, "wifi: scan request %u to the supplicant: ssid %u, %u frequencies -> %d", said, pending.ssid_length, pending.scan_frequency_count, result);
     }
     if (!result) {
       lx_shared_spin_lock(&boundary_lock);

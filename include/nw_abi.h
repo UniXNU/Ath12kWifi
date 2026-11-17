@@ -67,6 +67,10 @@ struct nw_wifi_events {
 };
 void nw_wifi_set_events(const struct nw_wifi_events *ev);
 int nw_wifi_scan(const uint8_t *ssid, size_t len);                       /* ssid may be NULL (all networks) */
+/* As nw_wifi_scan, on the given channels (MHz) only; none (count 0) is every supported channel. -EINVAL above
+ * NW_WIFI_SCAN_FREQUENCIES_MAX: the caller scans every channel instead. */
+#define NW_WIFI_SCAN_FREQUENCIES_MAX 32
+int nw_wifi_scan_frequencies(const uint8_t *ssid, size_t len, const uint32_t *mhz, size_t count);
 int nw_wifi_bss_count(void);
 int nw_wifi_bss_get(int i, struct nw_bss_info *out);                     /* 0 on success */
 int nw_wifi_connect(const uint8_t *ssid, size_t len, const uint8_t *bssid, const char *pass, size_t plen);   /* pass NULL: open network */
