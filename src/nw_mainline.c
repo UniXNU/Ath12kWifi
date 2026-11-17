@@ -12,6 +12,27 @@ static spinlock_t boundary_lock;
 static struct nw_wifi_status status;
 static struct nw_bss_info *bsses;
 static unsigned bss_count, rx_drops;
+/* When each held network was last heard, in ms of the clock that counts sleep: its age is taken from this at the read.
+ * cfg80211 stamps a frame with jiffies, which stand still while the system sleeps. The lead of the sleep-counting clock
+ * over jiffies is kept for the last few wakes, so a frame from before a sleep is as old as that sleep and more. */
+#define WAKES_MAX 8
+#define WAKE_LEAD_MS 1000 /* the two clocks are read one after the other; less than this is not a sleep */
+static u64 bss_heard[UI_BSS_MAX];
+static struct { u64 since; s64 lead; } wakes[WAKES_MAX];
+static unsigned wake_count;
+static s64 lead_before; /* the lead before wakes[0] */
+static s64 clock_lead(u64 now) { return (s64)(lx_boottime_ns() / 1000000ULL) - (s64)now; }
+static void note_wake(void) {
+  u64 now = lx_now_ms(); s64 lead = clock_lead(now);
+  if (lead - (wake_count ? wakes[wake_count - 1].lead : lead_before) < WAKE_LEAD_MS) return;
+  if (wake_count == WAKES_MAX) { lead_before = wakes[0].lead; memmove(wakes, wakes + 1, (--wake_count) * sizeof(wakes[0])); }
+  wakes[wake_count].since = now; wakes[wake_count++].lead = lead;
+}
+static u64 heard_at(unsigned long stamp) {
+  s64 lead = lead_before;
+  for (unsigned i = 0; i < wake_count && wakes[i].since <= stamp; i++) lead = wakes[i].lead;
+  return (u64)((s64)stamp + lead);
+}
 struct ui_request { unsigned operation, frequency; u8 ssid[32], ssid_length, bssid[6], has_bssid; char password[64]; u8 password_length, enabled;
                    u32 scan_frequencies[NW_WIFI_SCAN_FREQUENCIES_MAX]; u8 scan_frequency_count; };
 static struct ui_request ui;
@@ -55,7 +76,7 @@ static void scan_snapshot(struct net_device *dev) {
     out->freq_mhz = entry->pub.channel->center_freq;
     out->signal_dbm = rdev->wiphy.signal_type == CFG80211_SIGNAL_TYPE_MBM ? entry->pub.signal / 100 : entry->pub.signal;
     out->caps = entry->pub.capability; out->beacon_int = entry->pub.beacon_interval;
-    out->age_ms = jiffies_to_msecs(jiffies - entry->ts);
+    bss_heard[bss_count - 1] = heard_at(entry->ts);
     out->ie_len = min_t(size_t, ies->len, sizeof(out->ie)); memcpy(out->ie, ies->data, out->ie_len);
     const struct element *ssid = cfg80211_find_elem(WLAN_EID_SSID, ies->data, ies->len);
     if (ssid && ssid->datalen <= 32) { out->ssid_len = ssid->datalen; memcpy(out->ssid, ssid->data, ssid->datalen); }
@@ -184,7 +205,7 @@ int nw_mainline_init(void) {
   spin_lock_init(&boundary_lock); memset(&status, 0, sizeof(status)); stopping = false;
   memzero_explicit(&ui, sizeof(ui)); bss_count = rx_drops = 0; scan_ack_pending = false;
   memset(&radio, 0, sizeof(radio)); radio.enabled = true; scan_waiting = false; scan_deadline = 0;
-  join_waiting = false; join_deadline = 0;
+  join_waiting = false; join_deadline = 0; wake_count = 0; lead_before = clock_lead(lx_now_ms());
   INIT_WORK(&transmit_work, transmit_run);
   /* Keep the UI snapshot outside the kernel collection's fixed data gap. */
   bsses = kcalloc(UI_BSS_MAX, sizeof(*bsses), GFP_KERNEL);
@@ -247,7 +268,14 @@ int nw_wifi_bss_count(void) { lx_shared_spin_lock(&boundary_lock); unsigned coun
 int nw_wifi_bss_get(int index, struct nw_bss_info *out) {
   if (!out) return -EINVAL; lx_shared_spin_lock(&boundary_lock);
   int result = index < 0 || (unsigned)index >= bss_count ? -ENOENT : 0;
-  if (!result) *out = bsses[index]; lx_shared_spin_unlock(&boundary_lock); return result;
+  if (!result) {
+    *out = bsses[index];
+    /* The joined network is heard for as long as the link is up: mac80211 ends the link when its beacons stop. */
+    bool joined = status.state >= NW_STA_AUTH && ether_addr_equal(out->bssid, status.bssid);
+    u64 now = lx_boottime_ns() / 1000000ULL, age = joined || now < bss_heard[index] ? 0 : now - bss_heard[index];
+    out->age_ms = min_t(u64, age, U32_MAX);
+  }
+  lx_shared_spin_unlock(&boundary_lock); return result;
 }
 void nw_wifi_status_get(struct nw_wifi_status *out) { lx_shared_spin_lock(&boundary_lock); *out = status; lx_shared_spin_unlock(&boundary_lock); }
 void nw_mainline_rate_update(const u8 *bssid, unsigned rate) {
@@ -320,6 +348,7 @@ static void transmit(void) {
 void nw_mainline_run(void) {
   bool timed_out = false;
   lx_shared_spin_lock(&boundary_lock);
+  note_wake();
   if (join_waiting && lx_now_ms() >= join_deadline) {
     join_waiting = false; timed_out = true;
     memzero_explicit(&ui, sizeof(ui)); ui.operation = NW_CONTROL_DISCONNECT_REQUEST;
