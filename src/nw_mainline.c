@@ -12,7 +12,32 @@ static spinlock_t boundary_lock;
 static struct nw_wifi_status status;
 static struct nw_bss_info *bsses;
 static unsigned bss_count, rx_drops;
-struct ui_request { unsigned operation, frequency; u8 ssid[32], ssid_length, bssid[6], has_bssid; char password[64]; u8 password_length, enabled; };
+/* When each held network was last heard, in ms of the clock that counts sleep: its age is taken from this at the read.
+ * cfg80211 stamps a frame with jiffies, which stand still while the system sleeps. The lead of the sleep-counting clock
+ * over jiffies is kept for the last few wakes, so a frame from before a sleep is as old as that sleep and more.
+ * cfg80211 keeps every network it has heard, the oldest first; one not heard for HELD_MS when a scan ends is not held,
+ * so the networks in range find a place among the UI_BSS_MAX. */
+#define HELD_MS 120000
+#define WAKES_MAX 8
+#define WAKE_LEAD_MS 1000 /* the two clocks are read one after the other; less than this is not a sleep */
+static u64 bss_heard[UI_BSS_MAX];
+static struct { u64 since; s64 lead; } wakes[WAKES_MAX];
+static unsigned wake_count;
+static s64 lead_before; /* the lead before wakes[0] */
+static s64 clock_lead(u64 now) { return (s64)(lx_boottime_ns() / 1000000ULL) - (s64)now; }
+static void note_wake(void) {
+  u64 now = lx_now_ms(); s64 lead = clock_lead(now);
+  if (lead - (wake_count ? wakes[wake_count - 1].lead : lead_before) < WAKE_LEAD_MS) return;
+  if (wake_count == WAKES_MAX) { lead_before = wakes[0].lead; memmove(wakes, wakes + 1, (--wake_count) * sizeof(wakes[0])); }
+  wakes[wake_count].since = now; wakes[wake_count++].lead = lead;
+}
+static u64 heard_at(unsigned long stamp) {
+  s64 lead = lead_before;
+  for (unsigned i = 0; i < wake_count && wakes[i].since <= stamp; i++) lead = wakes[i].lead;
+  return (u64)((s64)stamp + lead);
+}
+struct ui_request { unsigned operation, frequency; u8 ssid[32], ssid_length, bssid[6], has_bssid; char password[64]; u8 password_length, enabled;
+                   u32 scan_frequencies[NW_WIFI_SCAN_FREQUENCIES_MAX]; u8 scan_frequency_count; };
 static struct ui_request ui;
 static struct { bool pending, enabled; unsigned revision; } radio;
 static u64 scan_deadline;
@@ -45,16 +70,20 @@ static void scan_snapshot(struct net_device *dev) {
   struct cfg80211_internal_bss *entry;
   rcu_read_lock(); spin_lock_bh(&rdev->bss_lock); lx_shared_spin_lock(&boundary_lock);
   bss_count = 0;
+  u64 now = lx_boottime_ns() / 1000000ULL;
   list_for_each_entry(entry, &rdev->bss_list, list) {
-    if (bss_count == UI_BSS_MAX) break;
     const struct cfg80211_bss_ies *ies = rcu_dereference(entry->pub.ies);
     if (!ies || !entry->pub.channel) continue;
-    struct nw_bss_info *out = &bsses[bss_count++]; memset(out, 0, sizeof(*out));
+    /* The joined network always has a place: the last one when the list is full. */
+    bool joined = status.state >= NW_STA_AUTH && ether_addr_equal(entry->pub.bssid, status.bssid);
+    u64 heard = heard_at(entry->ts);
+    if (!joined && (bss_count == UI_BSS_MAX || (now > heard && now - heard > HELD_MS))) continue;
+    unsigned place = bss_count == UI_BSS_MAX ? UI_BSS_MAX - 1 : bss_count++;
+    struct nw_bss_info *out = &bsses[place]; memset(out, 0, sizeof(*out)); bss_heard[place] = heard;
     memcpy(out->bssid, entry->pub.bssid, ETH_ALEN);
     out->freq_mhz = entry->pub.channel->center_freq;
     out->signal_dbm = rdev->wiphy.signal_type == CFG80211_SIGNAL_TYPE_MBM ? entry->pub.signal / 100 : entry->pub.signal;
     out->caps = entry->pub.capability; out->beacon_int = entry->pub.beacon_interval;
-    out->age_ms = jiffies_to_msecs(jiffies - entry->ts);
     out->ie_len = min_t(size_t, ies->len, sizeof(out->ie)); memcpy(out->ie, ies->data, out->ie_len);
     const struct element *ssid = cfg80211_find_elem(WLAN_EID_SSID, ies->data, ies->len);
     if (ssid && ssid->datalen <= 32) { out->ssid_len = ssid->datalen; memcpy(out->ssid, ssid->data, ssid->datalen); }
@@ -182,7 +211,7 @@ int nw_mainline_init(void) {
   spin_lock_init(&boundary_lock); memset(&status, 0, sizeof(status)); stopping = false;
   memzero_explicit(&ui, sizeof(ui)); bss_count = rx_drops = 0; scan_ack_pending = false;
   memset(&radio, 0, sizeof(radio)); radio.enabled = true; scan_waiting = false; scan_deadline = 0;
-  join_waiting = false; join_deadline = 0;
+  join_waiting = false; join_deadline = 0; wake_count = 0; lead_before = clock_lead(lx_now_ms());
   INIT_WORK(&transmit_work, transmit_run);
   /* Keep the UI snapshot outside the kernel collection's fixed data gap. */
   bsses = kcalloc(UI_BSS_MAX, sizeof(*bsses), GFP_KERNEL);
@@ -190,14 +219,17 @@ int nw_mainline_init(void) {
   const struct nw_cfg80211_observer callbacks = { .ready = ready, .event = event }; nw_cfg80211_observe(&callbacks);
   return 0;
 }
-int nw_wifi_scan(const u8 *ssid, size_t length) {
-  if (length > 32 || (length && !ssid)) return -EINVAL;
+int nw_wifi_scan(const u8 *ssid, size_t length) { return nw_wifi_scan_frequencies(ssid, length, NULL, 0); }
+int nw_wifi_scan_frequencies(const u8 *ssid, size_t length, const u32 *mhz, size_t count) {
+  if (length > 32 || (length && !ssid) || count > NW_WIFI_SCAN_FREQUENCIES_MAX || (count && !mhz)) return -EINVAL;
+  for (size_t i = 0; i < count; i++) if (mhz[i] < 2400 || mhz[i] > 7125) return -EINVAL;
   lx_shared_spin_lock(&boundary_lock);
   if (stopping || !radio.enabled) { lx_shared_spin_unlock(&boundary_lock); return -ENETDOWN; }
   if (scan_waiting) { lx_shared_spin_unlock(&boundary_lock); return 0; } /* Coalesce duplicate UI scan requests. */
   if (!ui.operation || ui.operation == NW_CONTROL_SCAN_REQUEST) {
     memzero_explicit(&ui, sizeof(ui)); ui.operation = NW_CONTROL_SCAN_REQUEST;
     ui.ssid_length = length; if (length) memcpy(ui.ssid, ssid, length);
+    ui.scan_frequency_count = count; for (size_t i = 0; i < count; i++) ui.scan_frequencies[i] = mhz[i];
     scan_waiting = true; scan_deadline = lx_now_ms() + 12000;
   } else scan_ack_pending = true;
   lx_shared_spin_unlock(&boundary_lock); return 0;
@@ -242,7 +274,14 @@ int nw_wifi_bss_count(void) { lx_shared_spin_lock(&boundary_lock); unsigned coun
 int nw_wifi_bss_get(int index, struct nw_bss_info *out) {
   if (!out) return -EINVAL; lx_shared_spin_lock(&boundary_lock);
   int result = index < 0 || (unsigned)index >= bss_count ? -ENOENT : 0;
-  if (!result) *out = bsses[index]; lx_shared_spin_unlock(&boundary_lock); return result;
+  if (!result) {
+    *out = bsses[index];
+    /* The joined network is heard for as long as the link is up: mac80211 ends the link when its beacons stop. */
+    bool joined = status.state >= NW_STA_AUTH && ether_addr_equal(out->bssid, status.bssid);
+    u64 now = lx_boottime_ns() / 1000000ULL, age = joined || now < bss_heard[index] ? 0 : now - bss_heard[index];
+    out->age_ms = min_t(u64, age, U32_MAX);
+  }
+  lx_shared_spin_unlock(&boundary_lock); return result;
 }
 void nw_wifi_status_get(struct nw_wifi_status *out) { lx_shared_spin_lock(&boundary_lock); *out = status; lx_shared_spin_unlock(&boundary_lock); }
 void nw_mainline_rate_update(const u8 *bssid, unsigned rate) {
@@ -315,6 +354,7 @@ static void transmit(void) {
 void nw_mainline_run(void) {
   bool timed_out = false;
   lx_shared_spin_lock(&boundary_lock);
+  note_wake();
   if (join_waiting && lx_now_ms() >= join_deadline) {
     join_waiting = false; timed_out = true;
     memzero_explicit(&ui, sizeof(ui)); ui.operation = NW_CONTROL_DISCONNECT_REQUEST;
@@ -351,7 +391,7 @@ void nw_mainline_run(void) {
   if (scan_ack && nw_events.scan_done) nw_events.scan_done();
   if (power_changing) { memzero_explicit(&pending, sizeof(pending)); nw_mainline_poll(); return; }
   if (pending.operation) {
-    u8 bytes[256]; struct nw_control_builder b;
+    u8 bytes[384]; struct nw_control_builder b;
     int result = nw_cfg80211_event_begin(&b, bytes, sizeof(bytes), pending.operation, 0);
     if (!result && pending.operation == NW_CONTROL_JOIN_REQUEST) {
       result = nw_cfg80211_begin_attempt();
@@ -365,8 +405,14 @@ void nw_mainline_run(void) {
     } else if (!result && pending.operation == NW_CONTROL_DISCONNECT_REQUEST) {
       result = nw_cfg80211_begin_attempt();
       if (!result) nw_cfg80211_event_begin(&b, bytes, sizeof(bytes), pending.operation, 0);
-    } else if (!result && pending.operation == NW_CONTROL_SCAN_REQUEST && pending.ssid_length) {
-      result = nw_control_put(&b, NW_CONTROL_ATTR_SSID, pending.ssid, pending.ssid_length);
+    } else if (!result && pending.operation == NW_CONTROL_SCAN_REQUEST) {
+      if (pending.ssid_length) result = nw_control_put(&b, NW_CONTROL_ATTR_SSID, pending.ssid, pending.ssid_length);
+      if (!result && pending.scan_frequency_count) {
+        /* The channels the UI asked for: a scan of every band takes about 16 s on WCN7850, longer than the UI waits for it. */
+        u8 frequencies[NW_WIFI_SCAN_FREQUENCIES_MAX * 4];
+        for (unsigned i = 0; i < pending.scan_frequency_count; i++) put_unaligned_le32(pending.scan_frequencies[i], frequencies + i * 4);
+        result = nw_control_put(&b, NW_CONTROL_ATTR_SCAN_FREQUENCIES, frequencies, pending.scan_frequency_count * 4u);
+      }
     }
     if (!result) result = nw_cfg80211_event_send(&b);
     if (!result) {

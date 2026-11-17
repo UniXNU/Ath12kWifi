@@ -24,6 +24,9 @@ static unsigned reads, releases, receives, wireless_events;
 static bool fail_allocation;
 static u8 ethernet[1600], last_wireless[8192];
 static size_t last_wireless_length;
+static u8 last_scan_request[256];
+static size_t last_scan_request_length;
+static unsigned scan_requests_sent;
 static struct { void *allocation, *stack[8]; size_t length; int depth; } live[4096];
 static void *allocate(size_t length) {
   if (fail_allocation) return NULL;
@@ -40,6 +43,8 @@ static void release(void *p) {
 static void *dma_allocate(size_t length, u64 *bus) { void *p = calloc(1, length); *bus = (uintptr_t)p; return p; }
 static void dma_release(size_t length, void *p, u64 bus) { (void)length; (void)bus; free(p); }
 static u64 now(void) { return ticks; }
+static u64 asleep; /* ms asleep so far: the clock that counts sleep leads the running one by this much */
+static u64 boot_ns(void) { return (ticks + asleep) * 1000000ULL; }
 static void sleep_ms(unsigned ms) { assert(!preemption_depth); ticks += ms; }
 static void poll(void) { nw_mainline_poll(); }
 static void halt(void) { abort(); }
@@ -47,12 +52,16 @@ static void log_line(int level, const char *text) { if (level <= 4) fprintf(stde
 static int firmware(const char *name, const u8 **bytes, size_t *length) { (void)name; (void)bytes; (void)length; return -ENOENT; }
 static const struct lx_platform platform = { .now_ms = now, .sleep_ms = sleep_ms, .poll = poll,
   .halt = halt, .log = log_line, .alloc = allocate, .free = release, .dma_alloc = dma_allocate,
-  .dma_free = dma_release, .fw_get = firmware, .preempt_disable = disable_preemption, .preempt_enable = enable_preemption };
+  .dma_free = dma_release, .fw_get = firmware, .preempt_disable = disable_preemption, .preempt_enable = enable_preemption,
+  .boottime_ns = boot_ns };
 void nw_wifi_hw_ready(struct ieee80211_hw *hw) { assert(hw == expected_hw); ready_count++; }
 static int transport_send(void *context, uint64_t owner, const void *bytes, size_t length) {
   (void)context; (void)owner; struct nw_control_view view; assert(!nw_control_decode(bytes, length, &view));
   if (view.header.operation == NW_CONTROL_WIRELESS_EVENT) {
     assert(length <= sizeof(last_wireless)); memcpy(last_wireless, bytes, length); last_wireless_length = length; wireless_events++;
+  }
+  if (view.header.operation == NW_CONTROL_SCAN_REQUEST) {
+    assert(length <= sizeof(last_scan_request)); memcpy(last_scan_request, bytes, length); last_scan_request_length = length; scan_requests_sent++;
   }
   return NW_CONTROL_SEND_OK;
 }
@@ -217,6 +226,105 @@ static void notification_boundary(struct net_device *dev) {
   nw_wifi_control_detach(session); nw_wifi_control_poll(); lx_pump();
   assert(genlmsg_unicast(NULL, old, 1) == -ESTALE && wireless_events == 1);
 }
+/* The channels airportd asks for reach the supplicant: a scan of every band takes about 16 s on WCN7850, past the 12 s the UI waits. */
+static const u8 *sent_scan_attribute(unsigned type, size_t *length) {
+  static struct nw_control_view view; assert(!nw_control_decode(last_scan_request, last_scan_request_length, &view));
+  return nw_control_get(&view, type, length);
+}
+static void scan_frequencies_reach_the_supplicant(void) {
+  const u32 two[] = {2437, 5180}; size_t length = 0;
+  unsigned before = scan_requests_sent;
+  /* The join cases end with a disconnect request that has no attempt to tear down here; it would hold the UI slot. */
+  assert(ui.operation == NW_CONTROL_DISCONNECT_REQUEST && !scan_waiting); memzero_explicit(&ui, sizeof(ui));
+  uint64_t session; assert(!nw_wifi_control_attach(&session));
+  u8 bytes[64]; struct nw_control_builder info;
+  assert(!nw_control_begin(&info, bytes, sizeof(bytes), NW_CONTROL_REQUEST, NW_CONTROL_INFO, 1, session, 0, 0));
+  assert(!nw_wifi_control_receive(session, info.length, copy_message, bytes)); nw_wifi_control_poll(); lx_pump();
+  assert(!nw_wifi_scan_frequencies(NULL, 0, two, ARRAY_SIZE(two))); nw_mainline_run(); nw_wifi_control_poll(); lx_pump();
+  assert(scan_requests_sent == before + 1);
+  const u8 *frequencies = sent_scan_attribute(NW_CONTROL_ATTR_SCAN_FREQUENCIES, &length);
+  assert(frequencies && length == 8 && get_unaligned_le32(frequencies) == 2437 && get_unaligned_le32(frequencies + 4) == 5180);
+  assert(!sent_scan_attribute(NW_CONTROL_ATTR_SSID, &length));
+  ticks += 12001; nw_mainline_run();
+  const u8 name[] = "hidden";
+  assert(!nw_wifi_scan_frequencies(name, 6, two, 1)); nw_mainline_run(); nw_wifi_control_poll(); lx_pump();
+  frequencies = sent_scan_attribute(NW_CONTROL_ATTR_SCAN_FREQUENCIES, &length);
+  assert(frequencies && length == 4 && get_unaligned_le32(frequencies) == 2437);
+  const u8 *ssid = sent_scan_attribute(NW_CONTROL_ATTR_SSID, &length); assert(ssid && length == 6 && !memcmp(ssid, name, 6));
+  ticks += 12001; nw_mainline_run();
+  /* A plain scan names no channel; more channels than the request holds are refused, the caller scans every band instead. */
+  assert(!nw_wifi_scan(NULL, 0)); nw_mainline_run(); nw_wifi_control_poll(); lx_pump();
+  assert(!sent_scan_attribute(NW_CONTROL_ATTR_SCAN_FREQUENCIES, &length));
+  ticks += 12001; nw_mainline_run();
+  u32 many[NW_WIFI_SCAN_FREQUENCIES_MAX + 1]; for (unsigned i = 0; i < ARRAY_SIZE(many); i++) many[i] = 2412 + 5 * (i % 13);
+  assert(nw_wifi_scan_frequencies(NULL, 0, many, ARRAY_SIZE(many)) == -EINVAL);
+  assert(nw_wifi_scan_frequencies(NULL, 0, NULL, 1) == -EINVAL);
+  nw_wifi_control_detach(session); nw_wifi_control_poll(); lx_pump();
+}
+/* A held network's age is the time since it was last heard, as of the read. The list is taken when a scan ends, and a board
+ * that answers the system from it while joined asks for no scan: an age taken with the list stood still, and so did every
+ * network in it. The time asleep counts, also between the frame and the list: the running clock stands still there. */
+static void pass(unsigned ms) { ticks += ms; (void)lx_now_ms(); nw_mainline_run(); }
+static void hear(const u8 *bssid) {
+  struct wiphy *wiphy = expected_hw->wiphy; struct ieee80211_channel *channel = ieee80211_get_channel(wiphy, 5180); assert(channel);
+  static const u8 elements[] = {WLAN_EID_SSID, 4, 'h', 'e', 'l', 'd'};
+  struct cfg80211_bss *bss = cfg80211_inform_bss(wiphy, channel, CFG80211_BSS_FTYPE_PRESP, bssid, 0, WLAN_CAPABILITY_ESS, 100,
+                                                 elements, sizeof(elements), 0, GFP_KERNEL);
+  assert(bss); cfg80211_put_bss(wiphy, bss);
+}
+static bool held(const u8 *bssid, u32 *age) {
+  struct nw_bss_info info;
+  for (int i = 0; i < nw_wifi_bss_count(); i++) {
+    assert(!nw_wifi_bss_get(i, &info)); if (memcmp(info.bssid, bssid, ETH_ALEN)) continue;
+    if (age) *age = info.age_ms; return true;
+  }
+  return false;
+}
+static u32 held_age(const u8 *bssid) { u32 age = 0; assert(held(bssid, &age)); return age; }
+static void held_age_is_taken_at_the_read(void) {
+  const u8 near[] = {2, 9, 9, 9, 9, 1}, before_sleep[] = {2, 9, 9, 9, 9, 2};
+  pass(1); hear(near);
+  pass(3000); event(NW_CONTROL_SCAN_DONE, 0, NULL);
+  assert(held_age(near) == 3000);
+  ticks += 5000; assert(held_age(near) == 8000);    /* no scan since: it is still 5 s older */
+  asleep += 20000; assert(held_age(near) == 28000); /* nor does the sleep leave it as it was */
+  /* Heard, then asleep, then listed: the sleep lies between the frame and the list. */
+  pass(1000); hear(before_sleep);
+  pass(500); asleep += 30000; pass(2000);
+  event(NW_CONTROL_SCAN_DONE, 0, NULL);
+  assert(held_age(before_sleep) == 32500 && held_age(near) == 61500);
+  /* The joined network is heard for as long as the link is up: mac80211 ends the link when its beacons stop. */
+  lx_shared_spin_lock(&boundary_lock); memcpy(status.bssid, near, ETH_ALEN); status.state = NW_STA_UP; lx_shared_spin_unlock(&boundary_lock);
+  ticks += 40000; assert(!held_age(near) && held_age(before_sleep) == 72500);
+  lx_shared_spin_lock(&boundary_lock); clear_connection(NW_STA_IDLE); lx_shared_spin_unlock(&boundary_lock);
+  assert(held_age(near) == 101500);
+  /* More wakes than are kept between the frame and the list: the sleeps of the kept wakes count, the ones before them do not. */
+  const u8 many_wakes[] = {2, 9, 9, 9, 9, 3};
+  pass(100); hear(many_wakes);
+  for (unsigned i = 0; i < WAKES_MAX + 3; i++) { asleep += 10000; pass(100); }
+  event(NW_CONTROL_SCAN_DONE, 0, NULL);
+  assert(held_age(many_wakes) == (WAKES_MAX + 3) * 100 + WAKES_MAX * 10000);
+}
+/* cfg80211 keeps every network it has heard, the oldest first, and the list has 128 places: a network not heard for two
+ * minutes when the scan ends is left out, so the ones in range find a place. The joined network always has one. */
+static void held_list_leaves_out_long_unheard(void) {
+  const u8 gone[] = {2, 8, 8, 8, 8, 1}, joined[] = {2, 8, 8, 8, 8, 2}, here[] = {2, 8, 8, 8, 8, 3};
+  pass(1); hear(gone); hear(joined);
+  asleep += HELD_MS; pass(1000); hear(here);
+  event(NW_CONTROL_SCAN_DONE, 0, NULL);
+  assert(!held(gone, NULL) && !held(joined, NULL) && held_age(here) == 0 && nw_wifi_bss_count() == 1);
+  lx_shared_spin_lock(&boundary_lock); memcpy(status.bssid, joined, ETH_ALEN); status.state = NW_STA_UP; lx_shared_spin_unlock(&boundary_lock);
+  event(NW_CONTROL_SCAN_DONE, 0, NULL);
+  assert(!held(gone, NULL) && held(joined, NULL) && held(here, NULL) && nw_wifi_bss_count() == 2);
+  /* More networks in range than places, the joined one heard last of all: it takes the last place. */
+  const u8 late[] = {2, 8, 8, 8, 8, 4}; u8 crowd[ETH_ALEN] = {2, 7, 7, 7, 0, 0};
+  for (unsigned i = 0; i < UI_BSS_MAX + 4; i++) { crowd[4] = i >> 8; crowd[5] = i; hear(crowd); }
+  hear(late);
+  lx_shared_spin_lock(&boundary_lock); memcpy(status.bssid, late, ETH_ALEN); lx_shared_spin_unlock(&boundary_lock);
+  event(NW_CONTROL_SCAN_DONE, 0, NULL);
+  assert(nw_wifi_bss_count() == UI_BSS_MAX && held(late, NULL));
+  lx_shared_spin_lock(&boundary_lock); clear_connection(NW_STA_IDLE); lx_shared_spin_unlock(&boundary_lock);
+}
 int main(void) {
   lx_plat = &platform; lx_root_init();
   fail_allocation = true; assert(nw_mainline_init() == -ENOMEM); nw_mainline_shutdown();
@@ -242,6 +350,8 @@ int main(void) {
   assert(!nw_cfg80211_set_power(0)); assert(!netif_running(dev) && !interfaces && stops == 1);
   assert(!nw_cfg80211_set_power(1)); assert(netif_running(dev) && interfaces == 1 && starts == 2);
   data_boundary(dev); power_and_scan_ordering(dev); join_channel_hint(); join_completion_and_signal(); notification_boundary(dev);
+  scan_frequencies_reach_the_supplicant();
+  held_age_is_taken_at_the_read(); held_list_leaves_out_long_unheard();
   nw_mainline_shutdown(); ieee80211_unregister_hw(expected_hw); ieee80211_free_hw(expected_hw);
   lx_exit_ieee80211_exit(); lx_exit_cfg80211_exit();
   for (unsigned i = 0; i < 10; i++) { lx_pump(); ticks++; }

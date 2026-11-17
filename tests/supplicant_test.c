@@ -26,7 +26,8 @@ static struct wpa_ptk ptk;
 static u8 anonce[32], gtk[16], group2[16], message3[512];
 static size_t message3_length;
 static struct wpa_supplicant *supplicant;
-static int passed, open_network, wrong_password;
+static int passed, open_network, wrong_password, scan_mode;
+static unsigned scan_frequencies_seen;
 
 /* The test replaces only socket opening, retaining the production client. */
 struct nw_control_client *nw_control_client_open(void)
@@ -224,6 +225,13 @@ static void *kernel(void *unused)
     switch (operation) {
     case NW_CONTROL_INFO:
       generation++;
+      if (scan_mode) {
+        /* airportd's scan of two channels, as the kernel hands it over (nw_mainline.c). */
+        u8 frequencies[8]; WPA_PUT_LE32(frequencies, 2437); WPA_PUT_LE32(frequencies + 4, 5180);
+        event_begin(&b, event_bytes, sizeof(event_bytes), NW_CONTROL_SCAN_REQUEST);
+        assert(!nw_control_put(&b, NW_CONTROL_ATTR_SCAN_FREQUENCIES, frequencies, sizeof(frequencies)));
+        send_packet(&b); break;
+      }
       event_begin(&b, event_bytes, sizeof(event_bytes), NW_CONTROL_JOIN_REQUEST);
       assert(!nw_control_put(&b, NW_CONTROL_ATTR_SSID, ssid, sizeof(ssid) - 1));
       if (!open_network) assert(!nw_control_put_u32(&b, NW_CONTROL_ATTR_FREQUENCY, 5180));
@@ -236,7 +244,10 @@ static void *kernel(void *unused)
     case NW_CONTROL_SCAN:
       {
         size_t bytes; const u8 *frequencies = nw_control_get(&request, NW_CONTROL_ATTR_SCAN_FREQUENCIES, &bytes);
-        assert(open_network ? bytes == 0 : (frequencies && bytes == 4 && WPA_GET_LE32(frequencies) == 5180));
+        if (scan_mode) {
+          assert(frequencies && bytes == 8 && WPA_GET_LE32(frequencies) == 2437 && WPA_GET_LE32(frequencies + 4) == 5180);
+          __atomic_add_fetch(&scan_frequencies_seen, 1, __ATOMIC_RELEASE);
+        } else assert(open_network ? bytes == 0 : (frequencies && bytes == 4 && WPA_GET_LE32(frequencies) == 5180));
       }
       event_begin(&b, event_bytes, sizeof(event_bytes), NW_CONTROL_SCAN_DONE); send_packet(&b); break;
     case NW_CONTROL_AUTHENTICATE: {
@@ -284,6 +295,10 @@ static void power_waits_for_selection(void)
 static void check(void *unused, void *unused2)
 {
   (void)unused; (void)unused2;
+  if (scan_mode && __atomic_load_n(&scan_frequencies_seen, __ATOMIC_ACQUIRE)) {
+    assert(supplicant->wpa_state != WPA_COMPLETED && !authorized);
+    passed = 1; eloop_terminate(); return;
+  }
   if ((open_network && supplicant->wpa_state == WPA_COMPLETED) || __atomic_load_n(&finished, __ATOMIC_ACQUIRE)) {
     if (wrong_password) {
       assert(supplicant->wpa_state != WPA_COMPLETED && wrong_key_reports == 1 && m2_seen == 1);
@@ -314,7 +329,7 @@ static void timeout(void *unused, void *unused2)
 }
 int main(int argc, char **argv)
 {
-  assert(argc == 3); open_network = !strcmp(argv[2], "open"); wrong_password = !strcmp(argv[2], "wrong");
+  assert(argc == 3); open_network = !strcmp(argv[2], "open"); wrong_password = !strcmp(argv[2], "wrong"); scan_mode = !strcmp(argv[2], "scan");
   int sockets[2]; assert(!socketpair(AF_UNIX, SOCK_DGRAM, 0, sockets));
   user_fd = sockets[0]; kernel_fd = sockets[1];
   int wake_fd = dup(user_fd); assert(wake_fd >= 0);
@@ -335,7 +350,8 @@ int main(int argc, char **argv)
   assert(send(wake_fd, "x", 1, 0) == 1);
   pthread_join(thread, NULL); close(kernel_fd); close(wake_fd);
   assert(passed);
-  if (wrong_password) puts("supplicant: actual wrong passphrase produces an invalid M2 MIC; AP rejection reaches upstream WRONG_KEY decision and native failure report; no keys installed or port authorized passed");
+  if (scan_mode) puts("supplicant: a UI scan request's channels reach the driver scan unchanged passed");
+  else if (wrong_password) puts("supplicant: actual wrong passphrase produces an invalid M2 MIC; AP rejection reaches upstream WRONG_KEY decision and native failure report; no keys installed or port authorized passed");
   else if (open_network) puts("supplicant: original open-network scan/auth/assoc and authorized port, pinned BSSID, no key/EAPOL installation passed");
   else puts("supplicant: original scan/auth/assoc, pinned BSSID, passphrase PBKDF2, four-way handshake, PTK/GTK, group rekey, MIC rejection, stale-generation rejection, M3 replay without reinstall, wrong-key notification passed");
   return 0;
