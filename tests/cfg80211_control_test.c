@@ -77,9 +77,12 @@ struct cfg80211_bss *__cfg80211_get_bss(struct wiphy *wiphy, struct ieee80211_ch
 void cfg80211_put_bss(struct wiphy *wiphy, struct cfg80211_bss *value) {
   assert(wiphy == &rdev->wiphy && value == &bss[0].pub && bss_refs); bss_refs--;
 }
+static unsigned scan_ssids = 1;
 int cfg80211_scan(struct cfg80211_registered_device *device) {
   locked(); assert(device == rdev && rdev->scan_req && rdev->scan_req->req.n_channels == 1);
-  assert(rdev->scan_req->req.n_ssids == 1 && rdev->scan_req->req.ssids[0].ssid_len == 3); return 0;
+  assert(rdev->scan_req->req.n_ssids == scan_ssids);
+  /* rdev_scan refuses ssids without n_ssids, so a passive scan must leave it NULL */
+  assert(scan_ssids ? rdev->scan_req->req.ssids[0].ssid_len == 3 : !rdev->scan_req->req.ssids); return 0;
 }
 static int add_key(struct wiphy *wiphy, struct net_device *dev, int link, u8 index, bool pairwise,
   const u8 *address, struct key_params *key) {
@@ -187,6 +190,9 @@ int main(void) {
   assert(exchange() == NW_CONTROL_OK); assert(rdev->scan_req);
   struct sk_buff *done = nl80211_build_scan_msg(rdev, &wdev, false); assert(done); nl80211_send_scan_msg(rdev, done);
   kfree(rdev->scan_req); rdev->scan_req = NULL; dev_put(dev);
+  begin(NW_CONTROL_SCAN); scan_ssids = 0; assert(exchange() == NW_CONTROL_OK); assert(rdev->scan_req);
+  done = nl80211_build_scan_msg(rdev, &wdev, false); assert(done); nl80211_send_scan_msg(rdev, done);
+  kfree(rdev->scan_req); rdev->scan_req = NULL; dev_put(dev); scan_ssids = 1;
   u64 previous = generation; assert(!nw_cfg80211_begin_attempt() && generation > previous && opens == 2 && stops == 1);
   begin(NW_CONTROL_SET_PORT); nw_control_reply_state(&request, previous, 0);
   nw_control_put_u32(&request, NW_CONTROL_ATTR_AUTHORIZED, 1); assert(exchange() == NW_CONTROL_STALE && ports == 1);

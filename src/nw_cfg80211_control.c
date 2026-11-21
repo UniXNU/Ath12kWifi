@@ -72,8 +72,9 @@ static int scan(struct cfg80211_registered_device *rdev, const struct nw_control
   size_t ie_offset = ssid_offset + (ssid_bytes / 33) * sizeof(struct cfg80211_ssid);
   struct cfg80211_scan_request_int *request = kzalloc(ie_offset + ie_bytes, GFP_KERNEL);
   if (!request) return -ENOMEM;
-  request->req.ssids = (void *)((u8 *)request + ssid_offset);
   request->req.n_ssids = ssid_bytes / 33;
+  /* as nl80211 does: no SSID (a passive scan) leaves ssids NULL, which rdev_scan requires */
+  if (request->req.n_ssids) request->req.ssids = (void *)((u8 *)request + ssid_offset);
   for (unsigned i = 0; i < request->req.n_ssids; i++) {
     if (ssids[i * 33] > IEEE80211_MAX_SSID_LEN) { kfree(request); return -EINVAL; }
     request->req.ssids[i].ssid_len = ssids[i * 33];
