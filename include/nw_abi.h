@@ -33,6 +33,7 @@ struct nw_board {
   int (*msi_target)(uint32_t *lo, uint32_t *hi, uint32_t *data);   /* where the endpoint writes to raise vector 0 */
   void *(*map_phys)(uint64_t pa, size_t n);
   unsigned diagnostics;                              /* nonzero: also ask the firmware for its receive statistics while frames arrive */
+  uint8_t mac[6];                                    /* nonzero: the station address, for chips whose own is not in OTP (a phone's is in its NV) */
 };
 struct nw_wifi_stats { uint32_t stage, scans, frames, beacons, bss_seen; int last_err; };
 /* Cumulative buffer counters; snapshots do not reset live ownership counts. */

@@ -20,6 +20,8 @@
     "required": [
       "drivers/net/wireless/ath/ath12k/mac.c",
       "drivers/net/wireless/ath/ath12k/wifi7/dp_tx.c",
+      "drivers/net/wireless/ath/ath11k/pci.c",
+      "drivers/net/wireless/ath/ath11k/wmi.c",
       "drivers/bus/mhi/host/boot.c",
       "net/mac80211/mlme.c",
       "net/mac80211/agg-rx.c",

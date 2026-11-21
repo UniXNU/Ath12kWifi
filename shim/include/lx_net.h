@@ -33,6 +33,7 @@ int sock_create_kern(struct net *net, int family, int type, int proto, struct so
 void sock_release(struct socket *s);
 int kernel_getsockname(struct socket *s, struct sockaddr *addr);
 int kernel_connect(struct socket *s, struct sockaddr *addr, int len, int flags);
+#define sockaddr_unsized sockaddr
 int kernel_bind(struct socket *s, struct sockaddr *addr, int len);
 int kernel_sendmsg(struct socket *s, struct msghdr *m, struct kvec *v, size_t n, size_t len);
 int kernel_recvmsg(struct socket *s, struct msghdr *m, struct kvec *v, size_t n, size_t len, int flags);
