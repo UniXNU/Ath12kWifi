@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-# Lays out the generated include trees the sources are built from: out/pinned (public headers used as they are), out/ath12k-src and out/mhi-src
+# Lays out the generated include trees the sources are built from: out/pinned (public headers used as they are), out/ath12k-src, out/ath11k-src and out/mhi-src
 # (links to the driver sources with the trace points replaced by empty ones).
 cd "$(dirname "$0")/.."
 bash tools/pin-headers.sh
@@ -148,3 +148,4 @@ python3 tools/prepare-mac80211.py --subsystem cfg80211
 python3 tools/prepare-crypto.py
 python3 tools/prepare-cfg80211-native.py
 python3 tools/prepare-cfg80211-events.py
+bash tools/prepare-ath11k.sh
