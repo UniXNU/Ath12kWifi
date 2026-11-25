@@ -54,6 +54,7 @@ modes = (
     "wpa1-tkip",
     "wpa3-sae",
     "wpa3-transition",
+    "wpa3-transition-pmk",
     "open",
     "wrong",
     "wrong-sae",

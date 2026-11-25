@@ -77,6 +77,8 @@ static struct wpa_supplicant *supplicant;
 static int passed;
 static int open_network, wrong_password, scan_mode;
 static int mixed_mode, wpa1_mode, sae_mode, transition_mode, wrong_sae, wrong_sae_local;
+/* WPA2/WPA3 transition AP, station given the daemon's pre-derived PMK (IO80211 cipher 6): PSK, never SAE. */
+static int transition_pmk;
 static unsigned scan_frequencies_seen;
 #ifdef CONFIG_SAE
 static struct sae_data ap_sae;
@@ -136,7 +138,7 @@ static size_t beacon_security_ies(u8 *dst)
     os_memcpy(dst + sizeof(rsn_sae), rsnxe_h2e, sizeof(rsnxe_h2e));
     return sizeof(rsn_sae) + sizeof(rsnxe_h2e);
   }
-  if (transition_mode) {
+  if (transition_mode || transition_pmk) {
     os_memcpy(dst, rsn_transition, sizeof(rsn_transition));
     os_memcpy(dst + sizeof(rsn_transition), rsnxe_h2e, sizeof(rsnxe_h2e));
     return sizeof(rsn_transition) + sizeof(rsnxe_h2e);
@@ -226,7 +228,7 @@ static void message3_send(void)
     offset += sizeof(rsn_sae);
     os_memcpy(plain + offset, rsnxe_h2e, sizeof(rsnxe_h2e));
     offset += sizeof(rsnxe_h2e);
-  } else if (transition_mode) {
+  } else if (transition_mode || transition_pmk) {
     os_memcpy(plain + offset, rsn_transition, sizeof(rsn_transition));
     offset += sizeof(rsn_transition);
     os_memcpy(plain + offset, rsnxe_h2e, sizeof(rsnxe_h2e));
@@ -244,7 +246,7 @@ static void message3_send(void)
   os_memcpy(kde + 8, gtk, gtk_len);
   offset += 8 + gtk_len;
 
-  if (sae_mode || transition_mode) {
+  if (sae_mode || transition_mode || transition_pmk) {
     /* IEEE 802.11w IGTK KDE (OUI 00-0F-AC:9, 4B OUI+type + 2B keyid + 6B IPN + 16B key = 28B body, 30B total). */
     u8 *ikde = plain + offset;
     ikde[0] = 0xdd; ikde[1] = 28;
@@ -373,7 +375,7 @@ static void install(const struct nw_control_view *request)
   assert(key != NULL);
 
   if (index >= 4) {
-    assert((sae_mode || transition_mode) && index == 4 && !(flags & NW_CONTROL_KEY_PAIRWISE));
+    assert((sae_mode || transition_mode || transition_pmk) && index == 4 && !(flags & NW_CONTROL_KEY_PAIRWISE));
     assert(cipher == RSN_CIPHER_SUITE_AES_128_CMAC && length == 16);
     assert(!os_memcmp(key, igtk, 16));
     igtk_installs++;
@@ -559,6 +561,9 @@ static void *kernel(void *unused)
       } else if (wpa1_mode) {
         assert(cipher == RSN_CIPHER_SUITE_TKIP && group_cipher == RSN_CIPHER_SUITE_TKIP);
         assert(akm == RSN_AUTH_KEY_MGMT_PSK_OVER_802_1X && wpa_versions == 1);
+      } else if (transition_pmk) {
+        assert(cipher == RSN_CIPHER_SUITE_CCMP && group_cipher == RSN_CIPHER_SUITE_CCMP);
+        assert(akm == RSN_AUTH_KEY_MGMT_PSK_OVER_802_1X && mfp == 1 && wpa_versions == 2);
       } else if (sae_mode || transition_mode) {
         assert(cipher == RSN_CIPHER_SUITE_CCMP && group_cipher == RSN_CIPHER_SUITE_CCMP);
         assert(akm == RSN_AUTH_KEY_MGMT_SAE && mfp == 1 && wpa_versions == 4);
@@ -601,7 +606,7 @@ static void *kernel(void *unused)
       if (!open_network) assert(!nw_control_put_u32(&b, NW_CONTROL_ATTR_FREQUENCY, 5180));
       assert(!nw_control_put(&b, NW_CONTROL_ATTR_BSSID, ap, sizeof(ap)));
       if (!open_network) {
-        if (wpa1_mode) {
+        if (wpa1_mode || transition_pmk) {
           /* Exercise 64-hex pre-derived PMK (IO80211 cipher=6 path). */
           u8 pmk[32];
           char pmk_hex[65];
@@ -702,6 +707,9 @@ static void check(void *unused, void *unused2)
     if (sae_mode || transition_mode) {
       assert(sae_commits_seen == 1 && sae_confirms_seen == 1 && igtk_installs == 1);
     }
+    if (transition_pmk) {
+      assert(sae_commits_seen == 0 && sae_confirms_seen == 0 && igtk_installs == 1);
+    }
     assert(!wrong_key_reports);
     power_waits_for_selection();
     passed = 1; eloop_terminate(); return;
@@ -727,6 +735,7 @@ int main(int argc, char **argv)
   wpa1_mode = !strcmp(mode, "wpa1-tkip");
   sae_mode = !strcmp(mode, "wpa3-sae");
   transition_mode = !strcmp(mode, "wpa3-transition");
+  transition_pmk = !strcmp(mode, "wpa3-transition-pmk");
   wrong_sae = !strcmp(mode, "wrong-sae");
   wrong_sae_local = !strcmp(mode, "wrong-sae-local");
 

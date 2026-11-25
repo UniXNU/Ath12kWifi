@@ -77,6 +77,10 @@ static int join(struct wpa_supplicant *supplicant, const struct nw_control_view 
 #else
     goto fail;
 #endif
+  } else if (password_length == 64 && hex_pmk) {
+    /* A PMK the daemon derived (cipher 6) is no SAE password: SAE derives its PMK from the passphrase itself. With SAE
+     * listed too, a WPA2/WPA3 transition network would be joined by SAE and fail as a wrong key. */
+    key_mgmt = "WPA-PSK WPA-PSK-SHA256";
   } else if (password_length) {
 #ifdef CONFIG_SAE
     key_mgmt = "WPA-PSK WPA-PSK-SHA256 SAE";
@@ -93,12 +97,6 @@ static int join(struct wpa_supplicant *supplicant, const struct nw_control_view 
       os_memcpy(encoded, password, 64); encoded[64] = 0;
       os_snprintf(text, sizeof(text), "SET_NETWORK %d psk %s", id, encoded);
       result = command(supplicant, text, 0);
-#ifdef CONFIG_SAE
-      if (!result) {
-        os_snprintf(text, sizeof(text), "SET_NETWORK %d sae_password \"%s\"", id, encoded);
-        result = command(supplicant, text, 0);
-      }
-#endif
     } else if (password_length == 64) {
       printf_encode(encoded, sizeof(encoded), password, password_length);
       os_snprintf(text, sizeof(text), "SET_NETWORK %d sae_password \"%s\"", id, encoded);
