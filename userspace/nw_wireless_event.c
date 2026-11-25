@@ -93,6 +93,15 @@ void nw_sheng_wireless_event(void *context, const struct nw_control_view *view) 
     event.unprot_deauth.reason_code = WPA_GET_LE16(frame.data + 24);
     wpa_supplicant_event(context, message[16] == NL80211_CMD_UNPROT_DEAUTHENTICATE ? EVENT_UNPROT_DEAUTH : EVENT_UNPROT_DISASSOC, &event);
     return;
+  case NL80211_CMD_MICHAEL_MIC_FAILURE: {
+    /* As driver_nl80211_event.c: a TKIP MIC failure starts wpa_supplicant's report to the AP and its countermeasures.
+     * Without a key type the failure counts as pairwise. */
+    struct attribute source = find(attrs, size, NL80211_ATTR_MAC);
+    if (source.data && source.length == ETH_ALEN) event.michael_mic_failure.src = source.data;
+    event.michael_mic_failure.unicast =
+      value(attrs, size, NL80211_ATTR_KEY_TYPE, NL80211_KEYTYPE_PAIRWISE) == NL80211_KEYTYPE_PAIRWISE;
+    wpa_supplicant_event(context, EVENT_MICHAEL_MIC_FAILURE, &event); return;
+  }
   case NL80211_CMD_SET_REKEY_OFFLOAD: {
     struct attribute rekey = find(attrs, size, NL80211_ATTR_REKEY_DATA);
     struct attribute bssid = find(attrs, size, NL80211_ATTR_MAC);
