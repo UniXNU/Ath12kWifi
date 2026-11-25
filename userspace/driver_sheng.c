@@ -184,18 +184,31 @@ static int sheng_authenticate(void *priv, struct wpa_driver_auth_params *paramet
   /* Fast association can reuse fresh BSS results without calling scan2. */
   driver->join_frequency = 0;
   u8 bytes[8192]; struct nw_control_builder b; struct nw_control_view reply;
-  /* This profile advertises open authentication plus WPA2-PSK, not WEP/SAE. */
-  if (!parameters->bssid || parameters->auth_alg != WPA_AUTH_ALG_OPEN ||
-      parameters->ssid_len > SSID_MAX_LEN || parameters->auth_data_len ||
+  u32 auth_type = 0;
+  if (!parameters->bssid || parameters->ssid_len > SSID_MAX_LEN ||
       parameters->wep_key_len[0] || parameters->wep_key_len[1] ||
       parameters->wep_key_len[2] || parameters->wep_key_len[3]) return -1;
+  if (parameters->auth_alg == WPA_AUTH_ALG_OPEN) {
+    if (parameters->auth_data_len) return -1;
+    auth_type = 0; /* NL80211_AUTHTYPE_OPEN_SYSTEM */
+  } else if (parameters->auth_alg == WPA_AUTH_ALG_SAE) {
+    if (!parameters->local_state_change &&
+        (!parameters->auth_data || parameters->auth_data_len < 4 || parameters->auth_data_len > 4096))
+      return -1;
+    auth_type = 4; /* NL80211_AUTHTYPE_SAE */
+  } else {
+    return -1;
+  }
   if (sheng_begin(driver, &b, bytes, sizeof(bytes), NW_CONTROL_AUTHENTICATE)) return -1;
   if (nw_control_put(&b, NW_CONTROL_ATTR_BSSID, parameters->bssid, ETH_ALEN) ||
       nw_control_put(&b, NW_CONTROL_ATTR_SSID, parameters->ssid, parameters->ssid_len) ||
       nw_control_put_u32(&b, NW_CONTROL_ATTR_FREQUENCY, parameters->freq) ||
-      nw_control_put_u32(&b, NW_CONTROL_ATTR_AUTH_TYPE, 0) ||
+      nw_control_put_u32(&b, NW_CONTROL_ATTR_AUTH_TYPE, auth_type) ||
       nw_control_put_u32(&b, NW_CONTROL_ATTR_LOCAL_ONLY, parameters->local_state_change) ||
-      nw_control_put(&b, NW_CONTROL_ATTR_IE, parameters->ie, parameters->ie_len)) return sheng_invalid(&b);
+      nw_control_put(&b, NW_CONTROL_ATTR_IE, parameters->ie, parameters->ie_len) ||
+      (parameters->auth_data && parameters->auth_data_len &&
+       nw_control_put(&b, NW_CONTROL_ATTR_AUTH_DATA, parameters->auth_data, parameters->auth_data_len)))
+    return sheng_invalid(&b);
   int result = sheng_rpc(driver, &b, &reply);
   if (!result) {
     os_memcpy(driver->ssid, parameters->ssid, parameters->ssid_len);
@@ -212,6 +225,11 @@ static int sheng_associate(void *priv, struct wpa_driver_associate_params *param
   u32 pairwise = parameters->pairwise_suite == WPA_CIPHER_NONE ? 0 : wpa_cipher_to_suite(WPA_PROTO_RSN, parameters->pairwise_suite);
   u32 group = parameters->group_suite == WPA_CIPHER_NONE ? 0 : wpa_cipher_to_suite(WPA_PROTO_RSN, parameters->group_suite);
   u32 akm = wpa_akm_to_suite(parameters->key_mgmt_suite);
+  u32 wpa_versions = 0;
+  if (parameters->wpa_proto & WPA_PROTO_WPA)
+    wpa_versions |= 1; /* NL80211_WPA_VERSION_1 */
+  if (parameters->wpa_proto & WPA_PROTO_RSN)
+    wpa_versions |= wpa_key_mgmt_sae(parameters->key_mgmt_suite) ? 4 : 2; /* NL80211_WPA_VERSION_3 : _2 */
   if (sheng_begin(driver, &b, bytes, sizeof(bytes), NW_CONTROL_ASSOCIATE)) return -1;
   if (nw_control_put(&b, NW_CONTROL_ATTR_BSSID, parameters->bssid, ETH_ALEN) ||
       nw_control_put(&b, NW_CONTROL_ATTR_SSID, parameters->ssid, parameters->ssid_len) ||
@@ -220,6 +238,7 @@ static int sheng_associate(void *priv, struct wpa_driver_associate_params *param
       nw_control_put_u32(&b, NW_CONTROL_ATTR_PAIRWISE_CIPHER, pairwise) ||
       nw_control_put_u32(&b, NW_CONTROL_ATTR_GROUP_CIPHER, group) ||
       nw_control_put_u32(&b, NW_CONTROL_ATTR_AKM, akm) ||
+      nw_control_put_u32(&b, NW_CONTROL_ATTR_WPA_VERSIONS, wpa_versions) ||
       nw_control_put_u32(&b, NW_CONTROL_ATTR_MFP, parameters->mgmt_frame_protection == MGMT_FRAME_PROTECTION_REQUIRED) ||
       (parameters->prev_bssid && nw_control_put(&b, NW_CONTROL_ATTR_PREVIOUS_BSSID, parameters->prev_bssid, ETH_ALEN)))
     return sheng_invalid(&b);
@@ -243,6 +262,7 @@ static int sheng_set_key(void *priv, struct wpa_driver_set_key_params *parameter
       (parameters->key_flag & (KEY_FLAG_PMK | KEY_FLAG_MODIFY | KEY_FLAG_NEXT))) return -1;
   switch (parameters->alg) {
   case WPA_ALG_NONE: flags |= NW_CONTROL_KEY_DELETE; break;
+  case WPA_ALG_TKIP: cipher = RSN_CIPHER_SUITE_TKIP; break;
   case WPA_ALG_CCMP: cipher = RSN_CIPHER_SUITE_CCMP; break;
   case WPA_ALG_GCMP: cipher = RSN_CIPHER_SUITE_GCMP; break;
   case WPA_ALG_GCMP_256: cipher = RSN_CIPHER_SUITE_GCMP_256; break;
@@ -365,7 +385,7 @@ static void sheng_event(struct sheng_driver *driver, const struct nw_control_vie
   case NW_CONTROL_SCAN_DONE:
     event.scan_info.aborted = view->header.status != NW_CONTROL_OK;
     wpa_supplicant_event(driver->context, EVENT_SCAN_RESULTS, &event); break;
-  case NW_CONTROL_AUTH_FRAME:
+  case NW_CONTROL_AUTH_FRAME: {
     if (!frame || length < 30) break;
     os_memcpy(event.auth.peer, frame + 10, ETH_ALEN);
     os_memcpy(event.auth.bssid, frame + 16, ETH_ALEN);
@@ -374,7 +394,14 @@ static void sheng_event(struct sheng_driver *driver, const struct nw_control_vie
     event.auth.status_code = WPA_GET_LE16(frame + 28);
     event.auth.ies = frame + 30; event.auth.ies_len = length - 30;
     event.auth.frame_body = frame + 24; event.auth.frame_body_len = length - 24;
-    wpa_supplicant_event(driver->context, EVENT_AUTH, &event); break;
+    int sae_confirm = event.auth.auth_type == WLAN_AUTH_SAE &&
+                      event.auth.auth_transaction == 2 &&
+                      event.auth.status_code == WLAN_STATUS_SUCCESS &&
+                      nw_supplicant_sae_confirm_pending(driver->context, event.auth.bssid);
+    wpa_supplicant_event(driver->context, EVENT_AUTH, &event);
+    nw_supplicant_sae_confirm_check(driver->context, sae_confirm);
+    break;
+  }
   case NW_CONTROL_AUTH_TIMEOUT:
   case NW_CONTROL_ASSOC_TIMEOUT:
     if (!bssid) break;
@@ -477,15 +504,17 @@ static void *sheng_init(void *context, const char *ifname)
   os_memcpy(driver->address, address, ETH_ALEN);
   driver->generation = reply.header.generation;
   nw_control_client_generation(driver->client, driver->generation);
-  driver->capability.flags = WPA_DRIVER_FLAGS_SME | WPA_DRIVER_FLAGS_CONTROL_PORT;
+  driver->capability.flags = WPA_DRIVER_FLAGS_SME | WPA_DRIVER_FLAGS_SAE | WPA_DRIVER_FLAGS_CONTROL_PORT;
   driver->capability.flags2 = WPA_DRIVER_FLAGS2_CONTROL_PORT_RX | WPA_DRIVER_FLAGS2_CONTROL_PORT_TX_STATUS;
-  driver->capability.key_mgmt = WPA_DRIVER_CAPA_KEY_MGMT_WPA2_PSK | WPA_DRIVER_CAPA_KEY_MGMT_PSK_SHA256;
+  driver->capability.key_mgmt = WPA_DRIVER_CAPA_KEY_MGMT_WPA_PSK | WPA_DRIVER_CAPA_KEY_MGMT_WPA2_PSK |
+                                WPA_DRIVER_CAPA_KEY_MGMT_PSK_SHA256 | WPA_DRIVER_CAPA_KEY_MGMT_SAE;
   driver->capability.auth = WPA_DRIVER_AUTH_OPEN;
   size_t cipher_length;
   const u8 *ciphers = nw_control_get(&reply, NW_CONTROL_ATTR_CIPHERS, &cipher_length);
   if (!ciphers || cipher_length % 4) goto fail;
   for (size_t i = 0; i < cipher_length; i += 4) {
     switch (WPA_GET_LE32(ciphers + i)) {
+    case RSN_CIPHER_SUITE_TKIP: driver->capability.enc |= WPA_DRIVER_CAPA_ENC_TKIP; break;
     case RSN_CIPHER_SUITE_CCMP: driver->capability.enc |= WPA_DRIVER_CAPA_ENC_CCMP; break;
     case RSN_CIPHER_SUITE_GCMP: driver->capability.enc |= WPA_DRIVER_CAPA_ENC_GCMP; break;
     case RSN_CIPHER_SUITE_GCMP_256: driver->capability.enc |= WPA_DRIVER_CAPA_ENC_GCMP_256; break;
