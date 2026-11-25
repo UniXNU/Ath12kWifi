@@ -51,16 +51,33 @@ int cfg80211_mlme_mgmt_tx(struct cfg80211_registered_device *device, struct wire
 }
 /* These test doubles inspect the exact cfg80211 request, without replacing
  * production authentication code. Full upstream SME/WPA runs in test-supplicant. */
+static enum nl80211_auth_type last_auth_type;
+static u8 last_auth_data[128];
+static size_t last_auth_data_len;
+static u32 last_wpa_versions, last_pairwise, last_group, last_akm, last_key_cipher;
+static size_t last_key_len, last_seq_len;
+static bool last_mfp, last_key_pairwise;
+static u8 last_key_idx;
+
 int cfg80211_mlme_auth(struct cfg80211_registered_device *device, struct net_device *dev, struct cfg80211_auth_request *request) {
-  locked(); assert(device == rdev && dev == primary && request->bss == &bss[0].pub);
-  assert(request->auth_type == NL80211_AUTHTYPE_OPEN_SYSTEM && request->link_id == -1); auths++; return 0;
+  locked(); assert(device == rdev && dev == primary && request->bss == &bss[0].pub && request->link_id == -1);
+  assert(request->auth_type == NL80211_AUTHTYPE_OPEN_SYSTEM || request->auth_type == NL80211_AUTHTYPE_SAE);
+  last_auth_type = request->auth_type;
+  last_auth_data_len = request->auth_data_len;
+  assert(request->auth_data_len <= sizeof(last_auth_data));
+  if (request->auth_data_len) memcpy(last_auth_data, request->auth_data, request->auth_data_len);
+  auths++; return 0;
 }
 int cfg80211_mlme_assoc(struct cfg80211_registered_device *device, struct net_device *dev,
   struct cfg80211_assoc_request *request, struct netlink_ext_ack *extack) {
   (void)extack; locked(); assert(device == rdev && dev == primary && request->bss == &bss[0].pub);
   assert(request->crypto.control_port && request->crypto.control_port_over_nl80211 && request->crypto.control_port_no_preauth);
-  assert(request->crypto.control_port_ethertype == cpu_to_be16(ETH_P_PAE) && request->crypto.n_ciphers_pairwise == 1);
-  assert(request->crypto.ciphers_pairwise[0] == WLAN_CIPHER_SUITE_CCMP && request->link_id == -1);
+  assert(request->crypto.control_port_ethertype == cpu_to_be16(ETH_P_PAE) && request->link_id == -1);
+  last_wpa_versions = request->crypto.wpa_versions;
+  last_pairwise = request->crypto.n_ciphers_pairwise ? request->crypto.ciphers_pairwise[0] : 0;
+  last_group = request->crypto.cipher_group;
+  last_akm = request->crypto.n_akm_suites ? request->crypto.akm_suites[0] : 0;
+  last_mfp = request->use_mfp;
   assocs++; wdev.connected = true; memcpy(wdev.u.client.connected_addr, ap, ETH_ALEN); return 0;
 }
 int cfg80211_mlme_deauth(struct cfg80211_registered_device *device, struct net_device *dev,
@@ -83,8 +100,11 @@ int cfg80211_scan(struct cfg80211_registered_device *device) {
 }
 static int add_key(struct wiphy *wiphy, struct net_device *dev, int link, u8 index, bool pairwise,
   const u8 *address, struct key_params *key) {
-  locked(); assert(wiphy == &rdev->wiphy && dev == primary && link == -1 && index == 0 && pairwise);
-  assert(ether_addr_equal(address, ap) && key->cipher == WLAN_CIPHER_SUITE_CCMP && key->key_len == 16); keys++; return 0;
+  locked(); assert(wiphy == &rdev->wiphy && dev == primary && link == -1);
+  if (pairwise) assert(ether_addr_equal(address, ap)); else assert(address == NULL);
+  last_key_cipher = key->cipher; last_key_len = key->key_len; last_seq_len = key->seq_len;
+  last_key_pairwise = pairwise; last_key_idx = index;
+  keys++; return 0;
 }
 static int change_station(struct wiphy *wiphy, struct net_device *dev, const u8 *address, struct station_parameters *parameters) {
   (void)wiphy; (void)dev; locked(); assert(ether_addr_equal(address, ap));
@@ -127,7 +147,7 @@ int main(void) {
   lx_plat = &platform; lx_root_init();
   rdev = calloc(1, sizeof(*rdev)); assert(rdev); rdev->ops = &operations;
   mutex_init(&rdev->wiphy.mtx); INIT_LIST_HEAD(&rdev->bss_list);
-  static const u32 ciphers[] = {WLAN_CIPHER_SUITE_CCMP, WLAN_CIPHER_SUITE_AES_CMAC};
+  static const u32 ciphers[] = {WLAN_CIPHER_SUITE_TKIP, WLAN_CIPHER_SUITE_CCMP, WLAN_CIPHER_SUITE_AES_CMAC};
   rdev->wiphy.cipher_suites = ciphers; rdev->wiphy.n_cipher_suites = ARRAY_SIZE(ciphers);
   rdev->wiphy.max_scan_ssids = 16; rdev->wiphy.max_scan_ie_len = 2048; rdev->wiphy.signal_type = CFG80211_SIGNAL_TYPE_MBM;
   struct ieee80211_channel channel = { .band = NL80211_BAND_5GHZ, .center_freq = 5180 };
@@ -162,18 +182,85 @@ int main(void) {
   nw_control_put_u32(&request, NW_CONTROL_ATTR_WAIT, 0);
   assert(exchange() == NW_CONTROL_OK && management_frames == 1);
   begin(NW_CONTROL_AUTHENTICATE); bss_attributes(); nw_control_put_u32(&request, NW_CONTROL_ATTR_AUTH_TYPE, 0);
-  assert(exchange() == NW_CONTROL_OK && auths == 1 && !bss_refs);
+  assert(exchange() == NW_CONTROL_OK && auths == 1 && last_auth_type == NL80211_AUTHTYPE_OPEN_SYSTEM && !last_auth_data_len && !bss_refs);
+  /* Open system must reject unexpected SAE auth_data; SAE must require >= 4 bytes of auth_data. */
+  u8 sae_commit[38] = {1, 0, 0x7e, 0, 19, 0};
+  begin(NW_CONTROL_AUTHENTICATE); bss_attributes(); nw_control_put_u32(&request, NW_CONTROL_ATTR_AUTH_TYPE, 0);
+  nw_control_put(&request, NW_CONTROL_ATTR_AUTH_DATA, sae_commit, sizeof(sae_commit));
+  assert(exchange() == NW_CONTROL_INVALID && auths == 1);
+  begin(NW_CONTROL_AUTHENTICATE); bss_attributes(); nw_control_put_u32(&request, NW_CONTROL_ATTR_AUTH_TYPE, NL80211_AUTHTYPE_SAE);
+  assert(exchange() == NW_CONTROL_INVALID && auths == 1);
+  begin(NW_CONTROL_AUTHENTICATE); bss_attributes(); nw_control_put_u32(&request, NW_CONTROL_ATTR_AUTH_TYPE, NL80211_AUTHTYPE_SAE);
+  nw_control_put(&request, NW_CONTROL_ATTR_AUTH_DATA, sae_commit, 3);
+  assert(exchange() == NW_CONTROL_INVALID && auths == 1);
+  begin(NW_CONTROL_AUTHENTICATE); bss_attributes(); nw_control_put_u32(&request, NW_CONTROL_ATTR_AUTH_TYPE, NL80211_AUTHTYPE_SAE);
+  nw_control_put(&request, NW_CONTROL_ATTR_AUTH_DATA, sae_commit, sizeof(sae_commit));
+  assert(exchange() == NW_CONTROL_OK && auths == 2 && last_auth_type == NL80211_AUTHTYPE_SAE &&
+         last_auth_data_len == sizeof(sae_commit) && !memcmp(last_auth_data, sae_commit, sizeof(sae_commit)) && !bss_refs);
+
   begin(NW_CONTROL_ASSOCIATE); bss_attributes(); nw_control_put_u32(&request, NW_CONTROL_ATTR_PAIRWISE_CIPHER, WLAN_CIPHER_SUITE_CCMP);
   nw_control_put_u32(&request, NW_CONTROL_ATTR_GROUP_CIPHER, WLAN_CIPHER_SUITE_CCMP); nw_control_put_u32(&request, NW_CONTROL_ATTR_AKM, WLAN_AKM_SUITE_PSK);
-  nw_control_put_u32(&request, NW_CONTROL_ATTR_MFP, 0); assert(exchange() == NW_CONTROL_OK && assocs == 1 && !bss_refs);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_MFP, 0);
+  assert(exchange() == NW_CONTROL_OK && assocs == 1 && last_wpa_versions == NL80211_WPA_VERSION_2 && !bss_refs);
+
+  /* WPA3-SAE association with NL80211_WPA_VERSION_3 and MFP=1 (roam/reassoc via prev_bssid). */
+  begin(NW_CONTROL_ASSOCIATE); bss_attributes(); nw_control_put(&request, NW_CONTROL_ATTR_PREVIOUS_BSSID, ap, ETH_ALEN);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_PAIRWISE_CIPHER, WLAN_CIPHER_SUITE_CCMP);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_GROUP_CIPHER, WLAN_CIPHER_SUITE_CCMP);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_AKM, WLAN_AKM_SUITE_SAE);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_WPA_VERSIONS, NL80211_WPA_VERSION_3);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_MFP, 1);
+  assert(exchange() == NW_CONTROL_OK && assocs == 2 && last_akm == WLAN_AKM_SUITE_SAE &&
+         last_wpa_versions == NL80211_WPA_VERSION_3 && last_mfp && !bss_refs);
+
+  /* WPA1-TKIP association with NL80211_WPA_VERSION_1, plus invalid wpa_versions rejection. */
+  begin(NW_CONTROL_ASSOCIATE); bss_attributes(); nw_control_put(&request, NW_CONTROL_ATTR_PREVIOUS_BSSID, ap, ETH_ALEN);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_PAIRWISE_CIPHER, WLAN_CIPHER_SUITE_TKIP);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_GROUP_CIPHER, WLAN_CIPHER_SUITE_TKIP);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_AKM, WLAN_AKM_SUITE_PSK);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_WPA_VERSIONS, NL80211_WPA_VERSION_1);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_MFP, 0);
+  assert(exchange() == NW_CONTROL_OK && assocs == 3 && last_pairwise == WLAN_CIPHER_SUITE_TKIP &&
+         last_group == WLAN_CIPHER_SUITE_TKIP && last_wpa_versions == NL80211_WPA_VERSION_1 && !bss_refs);
+
+  begin(NW_CONTROL_ASSOCIATE); bss_attributes(); nw_control_put(&request, NW_CONTROL_ATTR_PREVIOUS_BSSID, ap, ETH_ALEN);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_PAIRWISE_CIPHER, 0);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_GROUP_CIPHER, 0);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_AKM, 0);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_WPA_VERSIONS, 0);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_MFP, 0);
+  assert(exchange() == NW_CONTROL_OK && assocs == 4 && last_wpa_versions == 0 && last_pairwise == 0 && !bss_refs);
+
+  begin(NW_CONTROL_ASSOCIATE); bss_attributes(); nw_control_put(&request, NW_CONTROL_ATTR_PREVIOUS_BSSID, ap, ETH_ALEN);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_PAIRWISE_CIPHER, WLAN_CIPHER_SUITE_CCMP);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_GROUP_CIPHER, WLAN_CIPHER_SUITE_CCMP);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_AKM, WLAN_AKM_SUITE_PSK);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_WPA_VERSIONS, 0x80);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_MFP, 0);
+  assert(exchange() == NW_CONTROL_INVALID && assocs == 4);
+
   begin(NW_CONTROL_SET_KEY); u8 key[16] = {1}; nw_control_put_u32(&request, NW_CONTROL_ATTR_KEY_INDEX, 0);
   nw_control_put_u32(&request, NW_CONTROL_ATTR_KEY_FLAGS, NW_CONTROL_KEY_PAIRWISE); nw_control_put_u32(&request, NW_CONTROL_ATTR_CIPHER, WLAN_CIPHER_SUITE_CCMP);
   nw_control_put(&request, NW_CONTROL_ATTR_BSSID, ap, ETH_ALEN); nw_control_put(&request, NW_CONTROL_ATTR_KEY, key, sizeof(key));
-  assert(exchange() == NW_CONTROL_OK && keys == 1);
+  assert(exchange() == NW_CONTROL_OK && keys == 1 && last_key_cipher == WLAN_CIPHER_SUITE_CCMP && last_key_len == 16);
   begin(NW_CONTROL_SET_KEY); nw_control_put_u32(&request, NW_CONTROL_ATTR_KEY_INDEX, 0);
   nw_control_put_u32(&request, NW_CONTROL_ATTR_KEY_FLAGS, NW_CONTROL_KEY_PAIRWISE); nw_control_put_u32(&request, NW_CONTROL_ATTR_CIPHER, WLAN_CIPHER_SUITE_CCMP);
   nw_control_put(&request, NW_CONTROL_ATTR_BSSID, ap, ETH_ALEN); nw_control_put(&request, NW_CONTROL_ATTR_KEY, key, 15);
   assert(exchange() == NW_CONTROL_INVALID && keys == 1);
+  /* TKIP 32-byte pairwise and group keys accepted; 16-byte TKIP key rejected by upstream validator. */
+  u8 tkip_key[32] = {7}; u8 rsc[6] = {1, 2, 3, 4, 5, 6};
+  begin(NW_CONTROL_SET_KEY); nw_control_put_u32(&request, NW_CONTROL_ATTR_KEY_INDEX, 0);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_KEY_FLAGS, NW_CONTROL_KEY_PAIRWISE); nw_control_put_u32(&request, NW_CONTROL_ATTR_CIPHER, WLAN_CIPHER_SUITE_TKIP);
+  nw_control_put(&request, NW_CONTROL_ATTR_BSSID, ap, ETH_ALEN); nw_control_put(&request, NW_CONTROL_ATTR_KEY, tkip_key, sizeof(tkip_key));
+  assert(exchange() == NW_CONTROL_OK && keys == 2 && last_key_cipher == WLAN_CIPHER_SUITE_TKIP && last_key_len == 32 && last_key_pairwise);
+  begin(NW_CONTROL_SET_KEY); nw_control_put_u32(&request, NW_CONTROL_ATTR_KEY_INDEX, 1);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_KEY_FLAGS, 0); nw_control_put_u32(&request, NW_CONTROL_ATTR_CIPHER, WLAN_CIPHER_SUITE_TKIP);
+  nw_control_put(&request, NW_CONTROL_ATTR_KEY_SEQUENCE, rsc, sizeof(rsc)); nw_control_put(&request, NW_CONTROL_ATTR_KEY, tkip_key, sizeof(tkip_key));
+  assert(exchange() == NW_CONTROL_OK && keys == 3 && last_key_cipher == WLAN_CIPHER_SUITE_TKIP && !last_key_pairwise && last_key_idx == 1 && last_seq_len == 6);
+  begin(NW_CONTROL_SET_KEY); nw_control_put_u32(&request, NW_CONTROL_ATTR_KEY_INDEX, 1);
+  nw_control_put_u32(&request, NW_CONTROL_ATTR_KEY_FLAGS, 0); nw_control_put_u32(&request, NW_CONTROL_ATTR_CIPHER, WLAN_CIPHER_SUITE_TKIP);
+  nw_control_put(&request, NW_CONTROL_ATTR_KEY, tkip_key, 16);
+  assert(exchange() == NW_CONTROL_INVALID && keys == 3);
   begin(NW_CONTROL_SET_PORT); nw_control_put_u32(&request, NW_CONTROL_ATTR_AUTHORIZED, 1); assert(exchange() == NW_CONTROL_OK && ports == 1);
   begin(NW_CONTROL_TX_EAPOL); nw_control_put(&request, NW_CONTROL_ATTR_BSSID, ap, ETH_ALEN);
   nw_control_put(&request, NW_CONTROL_ATTR_EAPOL, "\2\3\0\0", 4); nw_control_put_u32(&request, NW_CONTROL_ATTR_ETHERTYPE, ETH_P_PAE);
@@ -193,7 +280,7 @@ int main(void) {
   assert(!nw_cfg80211_set_power(0) && stops == 2 && !netif_running(dev));
   begin(NW_CONTROL_INFO); assert(exchange() == NW_CONTROL_OK && opens == 2 && registrations == 1);
   begin(NW_CONTROL_AUTHENTICATE); bss_attributes(); nw_control_put_u32(&request, NW_CONTROL_ATTR_AUTH_TYPE, 0);
-  assert(exchange() == NW_CONTROL_NOT_READY && opens == 2 && auths == 1);
+  assert(exchange() == NW_CONTROL_NOT_READY && opens == 2 && auths == 2);
   begin(NW_CONTROL_SET_PORT); nw_control_put_u32(&request, NW_CONTROL_ATTR_AUTHORIZED, 0);
   assert(exchange() == NW_CONTROL_OK && !netif_running(dev));
   assert(!nw_cfg80211_set_power(1) && opens == 3 && netif_running(dev));
