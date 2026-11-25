@@ -98,12 +98,16 @@ static int join(struct wpa_supplicant *supplicant, const struct nw_control_view 
       os_snprintf(text, sizeof(text), "SET_NETWORK %d psk %s", id, encoded);
       result = command(supplicant, text, 0);
     } else if (password_length == 64) {
+      /* P"..." is the form wpa_config_parse_string decodes; a plain quoted value is kept as written. */
       printf_encode(encoded, sizeof(encoded), password, password_length);
-      os_snprintf(text, sizeof(text), "SET_NETWORK %d sae_password \"%s\"", id, encoded);
+      os_snprintf(text, sizeof(text), "SET_NETWORK %d sae_password P\"%s\"", id, encoded);
       result = command(supplicant, text, 0);
+    } else if (memchr(password, 0, password_length)) {
+      result = -1;
     } else {
-      printf_encode(encoded, sizeof(encoded), password, password_length);
-      os_snprintf(text, sizeof(text), "SET_NETWORK %d psk \"%s\"", id, encoded);
+      /* wpa_config_parse_psk keeps the bytes up to the last quote as they are (it decodes no escapes and refuses control
+       * characters), so the passphrase goes in unchanged: a quote, a backslash or UTF-8 in it stays what the user typed. */
+      os_snprintf(text, sizeof(text), "SET_NETWORK %d psk \"%.*s\"", id, (int)password_length, (const char *)password);
       result = command(supplicant, text, 0);
     }
     forced_memzero(encoded, sizeof(encoded)); forced_memzero(text, sizeof(text));

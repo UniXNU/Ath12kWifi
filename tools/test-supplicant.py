@@ -55,6 +55,8 @@ modes = (
     "wpa3-sae",
     "wpa3-transition",
     "wpa3-transition-pmk",
+    "wpa2-marks",
+    "wpa3-sae-marks",
     "open",
     "wrong",
     "wrong-sae",

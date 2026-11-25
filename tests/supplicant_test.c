@@ -65,7 +65,9 @@ static const u8 rsn_transition[] = {
 /* RSNXE IE advertising SAE Hash-to-Element (BIT(5) == 0x20) */
 static const u8 rsnxe_h2e[] = {WLAN_EID_RSNX, 1, 0x20};
 
-static const u8 password[] = "offline-passphrase";
+/* The passphrase; wpa2-marks and wpa3-sae-marks use one with a quote, a backslash and UTF-8 bytes. */
+static const u8 *password = (const u8 *)"offline-passphrase";
+static const char passphrase_marks[] = "pa\"ss\\w\xc3\xb6rd-1";
 static int user_fd, kernel_fd, stopping, finished;
 static _Atomic unsigned ptk_installs, gtk_installs, igtk_installs, m2_seen, m4_seen, rekey_seen, authorized, wrong_key_reports;
 static _Atomic unsigned sae_commits_seen, sae_confirms_seen;
@@ -79,6 +81,7 @@ static int open_network, wrong_password, scan_mode;
 static int mixed_mode, wpa1_mode, sae_mode, transition_mode, wrong_sae, wrong_sae_local;
 /* WPA2/WPA3 transition AP, station given the daemon's pre-derived PMK (IO80211 cipher 6): PSK, never SAE. */
 static int transition_pmk;
+static int marks_mode;
 static unsigned scan_frequencies_seen;
 #ifdef CONFIG_SAE
 static struct sae_data ap_sae;
@@ -736,6 +739,9 @@ int main(int argc, char **argv)
   sae_mode = !strcmp(mode, "wpa3-sae");
   transition_mode = !strcmp(mode, "wpa3-transition");
   transition_pmk = !strcmp(mode, "wpa3-transition-pmk");
+  marks_mode = !strcmp(mode, "wpa2-marks") || !strcmp(mode, "wpa3-sae-marks");
+  if (!strcmp(mode, "wpa3-sae-marks")) sae_mode = 1;
+  if (marks_mode) password = (const u8 *)passphrase_marks;
   wrong_sae = !strcmp(mode, "wrong-sae");
   wrong_sae_local = !strcmp(mode, "wrong-sae-local");
 
