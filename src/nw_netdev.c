@@ -254,7 +254,12 @@ int dev_open(struct net_device *dev, struct netlink_ext_ack *extack) {
   if (result) return result;
   dev->running = true;
   result = dev->netdev_ops && dev->netdev_ops->ndo_open ? dev->netdev_ops->ndo_open(dev) : 0;
-  if (!result) { dev->flags |= IFF_UP; notify_device(dev, NETDEV_UP); lx_netdev_tx_kick(dev); }
+  if (!result) {
+    dev->flags |= IFF_UP | 0x200; /* IFF_ALLMULTI for IPv6 ND & mDNS */
+    if (dev->netdev_ops && dev->netdev_ops->ndo_set_rx_mode) dev->netdev_ops->ndo_set_rx_mode(dev);
+    notify_device(dev, NETDEV_UP);
+    lx_netdev_tx_kick(dev);
+  }
   else dev->running = false;
   return result;
 }
@@ -337,11 +342,17 @@ void dev_sw_netstats_tx_add(struct net_device *dev, unsigned packets, unsigned b
   __atomic_fetch_add(&dev->stats.tx_packets, packets, __ATOMIC_RELAXED);
   __atomic_fetch_add(&dev->stats.tx_bytes, bytes, __ATOMIC_RELAXED);
 }
-int netif_receive_skb(struct sk_buff *skb) {
+static int netif_receive_skb_one(struct sk_buff *skb) {
   struct net_device *dev = skb->dev;
   if (dev && dev->input) return dev->input(dev, skb);
   if (dev) __atomic_fetch_add(&dev->stats.rx_dropped, 1, __ATOMIC_RELAXED);
   kfree_skb(skb); return -ENODEV;
+}
+int netif_receive_skb(struct sk_buff *skb) {
+  struct net_device *dev = skb->dev;
+  int rc = netif_receive_skb_one(skb);
+  if (dev && dev->input_flush) dev->input_flush(dev);
+  return rc;
 }
 int netif_rx(struct sk_buff *skb) { return netif_receive_skb(skb); }
 struct sk_buff *skb_gso_segment(struct sk_buff *skb, netdev_features_t features) {
@@ -355,7 +366,7 @@ void netif_receive_skb_list(struct list_head *list) {
     struct net_device *dev = skb->dev;
     if (last && last != dev && last->input_flush) last->input_flush(last);
     last = dev;
-    skb_list_del_init(skb); netif_receive_skb(skb);
+    skb_list_del_init(skb); netif_receive_skb_one(skb);
   }
   if (last && last->input_flush) last->input_flush(last);
 }

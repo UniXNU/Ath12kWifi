@@ -255,7 +255,10 @@ static int sheng_set_key(void *priv, struct wpa_driver_set_key_params *parameter
   }
   if ((parameters->key_flag & KEY_FLAG_PAIRWISE) ||
       (parameters->addr && !is_broadcast_ether_addr(parameters->addr))) flags |= NW_CONTROL_KEY_PAIRWISE;
-  if (parameters->set_tx) flags |= parameters->key_idx >= 4 ? NW_CONTROL_KEY_DEFAULT_MGMT : NW_CONTROL_KEY_DEFAULT_TX;
+  if (!(flags & (NW_CONTROL_KEY_DELETE | NW_CONTROL_KEY_PAIRWISE))) {
+    if (parameters->key_idx >= 4) flags |= NW_CONTROL_KEY_DEFAULT_MGMT;
+    else if (parameters->set_tx) flags |= NW_CONTROL_KEY_DEFAULT_TX;
+  }
   if (sheng_begin(driver, &b, bytes, sizeof(bytes), NW_CONTROL_SET_KEY)) return -1;
   if (nw_control_put_u32(&b, NW_CONTROL_ATTR_CIPHER, cipher) ||
       nw_control_put_u32(&b, NW_CONTROL_ATTR_KEY_FLAGS, flags) ||

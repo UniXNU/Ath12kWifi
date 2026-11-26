@@ -115,8 +115,9 @@ static int snapshot_build(struct cfg80211_registered_device *rdev) {
   list_for_each_entry(entry, &rdev->bss_list, list) {
     const struct cfg80211_bss_ies *ies = rcu_dereference(entry->pub.ies);
     if (!ies || !entry->pub.channel) continue;
-    if (count == 256 || ies->len > 7800 || memory + sizeof(struct bss_snapshot) + ies->len + 192 > 512 * 1024) {
-      result = -ENOBUFS; break;
+    if (ies->len > 7800) continue;
+    if (count == 512 || memory + sizeof(struct bss_snapshot) + ies->len + 192 > 1024 * 1024) {
+      break;
     }
     struct bss_snapshot *item = kmalloc(sizeof(*item) + ies->len + 192, GFP_ATOMIC);
     if (!item) { result = -ENOMEM; break; }
