@@ -164,11 +164,18 @@ static struct cfg80211_bss *find_bss(struct cfg80211_registered_device *rdev, co
 }
 static int authenticate(struct cfg80211_registered_device *rdev, const struct nw_control_view *request) {
   uint32_t auth, local = 0;
+  size_t auth_data_len = 0;
+  const u8 *auth_data = nw_control_get(request, NW_CONTROL_ATTR_AUTH_DATA, &auth_data_len);
   if (!rdev->ops->auth) return -EOPNOTSUPP;
-  if (nw_control_get_u32(request, NW_CONTROL_ATTR_AUTH_TYPE, &auth) || auth != NL80211_AUTHTYPE_OPEN_SYSTEM) return -EINVAL;
+  if (nw_control_get_u32(request, NW_CONTROL_ATTR_AUTH_TYPE, &auth) ||
+      (auth != NL80211_AUTHTYPE_OPEN_SYSTEM && auth != NL80211_AUTHTYPE_SAE)) return -EINVAL;
   nw_control_get_u32(request, NW_CONTROL_ATTR_LOCAL_ONLY, &local);
+  if (auth == NL80211_AUTHTYPE_OPEN_SYSTEM && (auth_data || auth_data_len)) return -EINVAL;
+  if (auth == NL80211_AUTHTYPE_SAE && !local && (!auth_data || auth_data_len < 4 || auth_data_len > 4096)) return -EINVAL;
   if (local) return 0; /* cfg80211 no longer tracks local authentication state. */
-  struct cfg80211_auth_request auth_request = { .auth_type = auth, .link_id = -1 };
+  struct cfg80211_auth_request auth_request = {
+    .auth_type = auth, .link_id = -1, .auth_data = auth_data, .auth_data_len = auth_data_len
+  };
   auth_request.bss = find_bss(rdev, request);
   if (!auth_request.bss) return -ENOENT;
   auth_request.ie = nw_control_get(request, NW_CONTROL_ATTR_IE, &auth_request.ie_len);
@@ -178,20 +185,27 @@ static int authenticate(struct cfg80211_registered_device *rdev, const struct nw
 }
 static int associate(struct cfg80211_registered_device *rdev, const struct nw_control_view *request) {
   if (!rdev->ops->assoc) return -EOPNOTSUPP;
-  uint32_t pairwise, group, akm, mfp;
+  uint32_t pairwise, group, akm, mfp, wpa_versions = 0;
   if (nw_control_get_u32(request, NW_CONTROL_ATTR_PAIRWISE_CIPHER, &pairwise) ||
       nw_control_get_u32(request, NW_CONTROL_ATTR_GROUP_CIPHER, &group) ||
       nw_control_get_u32(request, NW_CONTROL_ATTR_AKM, &akm) ||
       nw_control_get_u32(request, NW_CONTROL_ATTR_MFP, &mfp) || mfp > 1) return -EINVAL;
+  const uint32_t valid_versions = NL80211_WPA_VERSION_1 | NL80211_WPA_VERSION_2 | NL80211_WPA_VERSION_3;
+  if (!nw_control_get_u32(request, NW_CONTROL_ATTR_WPA_VERSIONS, &wpa_versions)) {
+    if ((wpa_versions & ~valid_versions) || (pairwise ? !wpa_versions : wpa_versions != 0)) return -EINVAL;
+  } else {
+    wpa_versions = pairwise ? NL80211_WPA_VERSION_2 : 0;
+  }
   if ((pairwise && !cipher_supported(&rdev->wiphy, pairwise)) ||
       (group && !cipher_supported(&rdev->wiphy, group)) ||
-      (akm && akm != WLAN_AKM_SUITE_PSK && akm != WLAN_AKM_SUITE_PSK_SHA256)) return -EOPNOTSUPP;
+      (akm && akm != WLAN_AKM_SUITE_PSK && akm != WLAN_AKM_SUITE_PSK_SHA256 && akm != WLAN_AKM_SUITE_SAE))
+    return -EOPNOTSUPP;
   struct cfg80211_assoc_request assoc_request = { .link_id = -1, .use_mfp = mfp };
   assoc_request.bss = find_bss(rdev, request);
   if (!assoc_request.bss) return -ENOENT;
   assoc_request.ie = nw_control_get(request, NW_CONTROL_ATTR_IE, &assoc_request.ie_len);
   assoc_request.prev_bssid = span(request, NW_CONTROL_ATTR_PREVIOUS_BSSID, ETH_ALEN);
-  assoc_request.crypto.wpa_versions = pairwise ? NL80211_WPA_VERSION_2 : 0;
+  assoc_request.crypto.wpa_versions = wpa_versions;
   assoc_request.crypto.cipher_group = group;
   if (pairwise) { assoc_request.crypto.n_ciphers_pairwise = 1; assoc_request.crypto.ciphers_pairwise[0] = pairwise; }
   if (akm) { assoc_request.crypto.n_akm_suites = 1; assoc_request.crypto.akm_suites[0] = akm; }

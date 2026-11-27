@@ -4,6 +4,9 @@
 #include <limits.h>
 #include "config.h"
 #include "wpa_supplicant_i.h"
+#ifdef CONFIG_SAE
+#include "common/sae.h"
+#endif
 #include "ctrl_iface.h"
 #include "nw_supplicant_frontend.h"
 
@@ -45,15 +48,18 @@ static int join(struct wpa_supplicant *supplicant, const struct nw_control_view 
   if (!ssid || !ssid_length || ssid_length > 32 || password_length > 64 ||
       (password_length && password_length < 8) ||
       (bssid && (bssid_length != ETH_ALEN || is_zero_ether_addr(bssid) || is_multicast_ether_addr(bssid)))) return -1;
+  int hex_pmk = 0;
   if (password_length == 64) {
     u8 psk[32];
-    int invalid = hexstr2bin((const char *)password, psk, sizeof(psk));
+    hex_pmk = hexstr2bin((const char *)password, psk, sizeof(psk)) == 0;
     forced_memzero(psk, sizeof(psk));
-    if (invalid) return -1;
   }
   /* wifid retains saved networks. The supplicant holds only its active profile
    * in RAM; REMOVE_NETWORK also clears old SME, PMK and handshake ownership. */
   if (fixed_command(supplicant, "REMOVE_NETWORK all")) return -1;
+#ifdef CONFIG_SAE
+  if (fixed_command(supplicant, "SET sae_pwe 2")) return -1;
+#endif
   char text[512] = "ADD_NETWORK";
   int id = command(supplicant, text, 1);
   if (id < 0) return -1;
@@ -64,22 +70,53 @@ static int join(struct wpa_supplicant *supplicant, const struct nw_control_view 
     os_snprintf(text, sizeof(text), "SET_NETWORK %d bssid " MACSTR, id, MAC2STR(bssid));
     if (command(supplicant, text, 0)) goto fail;
   }
-  os_snprintf(text, sizeof(text), "SET_NETWORK %d key_mgmt %s", id,
-              password_length ? "WPA-PSK WPA-PSK-SHA256" : "NONE");
+  const char *key_mgmt = "NONE";
+  if (password_length == 64 && !hex_pmk) {
+#ifdef CONFIG_SAE
+    key_mgmt = "SAE";
+#else
+    goto fail;
+#endif
+  } else if (password_length == 64 && hex_pmk) {
+    /* A PMK the daemon derived (cipher 6) is no SAE password: SAE derives its PMK from the passphrase itself. With SAE
+     * listed too, a WPA2/WPA3 transition network would be joined by SAE and fail as a wrong key. */
+    key_mgmt = "WPA-PSK WPA-PSK-SHA256";
+  } else if (password_length) {
+#ifdef CONFIG_SAE
+    key_mgmt = "WPA-PSK WPA-PSK-SHA256 SAE";
+#else
+    key_mgmt = "WPA-PSK WPA-PSK-SHA256";
+#endif
+  }
+  os_snprintf(text, sizeof(text), "SET_NETWORK %d key_mgmt %s", id, key_mgmt);
   if (command(supplicant, text, 0)) goto fail;
   if (password_length) {
     char encoded[4 * 64 + 1];
-    if (password_length == 64) {
+    int result = 0;
+    if (password_length == 64 && hex_pmk) {
       os_memcpy(encoded, password, 64); encoded[64] = 0;
       os_snprintf(text, sizeof(text), "SET_NETWORK %d psk %s", id, encoded);
-    } else {
+      result = command(supplicant, text, 0);
+    } else if (password_length == 64) {
+      /* P"..." is the form wpa_config_parse_string decodes; a plain quoted value is kept as written. */
       printf_encode(encoded, sizeof(encoded), password, password_length);
-      os_snprintf(text, sizeof(text), "SET_NETWORK %d psk \"%s\"", id, encoded);
+      os_snprintf(text, sizeof(text), "SET_NETWORK %d sae_password P\"%s\"", id, encoded);
+      result = command(supplicant, text, 0);
+    } else if (memchr(password, 0, password_length)) {
+      result = -1;
+    } else {
+      /* wpa_config_parse_psk keeps the bytes up to the last quote as they are (it decodes no escapes and refuses control
+       * characters), so the passphrase goes in unchanged: a quote, a backslash or UTF-8 in it stays what the user typed. */
+      os_snprintf(text, sizeof(text), "SET_NETWORK %d psk \"%.*s\"", id, (int)password_length, (const char *)password);
+      result = command(supplicant, text, 0);
     }
-    int result = command(supplicant, text, 0);
     forced_memzero(encoded, sizeof(encoded)); forced_memzero(text, sizeof(text));
     if (result) goto fail;
-    os_snprintf(text, sizeof(text), "SET_NETWORK %d proto RSN", id);
+    os_snprintf(text, sizeof(text), "SET_NETWORK %d proto WPA RSN", id);
+    if (command(supplicant, text, 0)) goto fail;
+    os_snprintf(text, sizeof(text), "SET_NETWORK %d pairwise CCMP TKIP", id);
+    if (command(supplicant, text, 0)) goto fail;
+    os_snprintf(text, sizeof(text), "SET_NETWORK %d group CCMP TKIP", id);
     if (command(supplicant, text, 0)) goto fail;
     os_snprintf(text, sizeof(text), "SET_NETWORK %d ieee80211w 1", id);
     if (command(supplicant, text, 0)) goto fail;
@@ -141,4 +178,27 @@ void nw_supplicant_auth_failed(void *context, const char *reason)
   if (supplicant->driver && !os_strcmp(supplicant->driver->name, "sheng") &&
       (!os_strcmp(reason, "WRONG_KEY") || !os_strcmp(reason, "NO_PSK_AVAILABLE")))
     nw_sheng_report_auth_failure(supplicant->drv_priv);
+}
+int nw_supplicant_sae_confirm_pending(void *context, const uint8_t *bssid)
+{
+#ifdef CONFIG_SAE
+  struct wpa_supplicant *supplicant = context;
+  if (!supplicant || !bssid) return 0;
+  return supplicant->wpa_state == WPA_AUTHENTICATING &&
+         supplicant->sme.sae.state == SAE_CONFIRMED &&
+         os_memcmp(supplicant->pending_bssid, bssid, ETH_ALEN) == 0;
+#else
+  (void)context; (void)bssid;
+  return 0;
+#endif
+}
+void nw_supplicant_sae_confirm_check(void *context, int was_pending)
+{
+#ifdef CONFIG_SAE
+  struct wpa_supplicant *supplicant = context;
+  if (was_pending && supplicant && supplicant->wpa_state == WPA_DISCONNECTED)
+    nw_supplicant_auth_failed(supplicant, "WRONG_KEY");
+#else
+  (void)context; (void)was_pending;
+#endif
 }

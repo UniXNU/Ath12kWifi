@@ -15,6 +15,12 @@ parser.add_argument("--jobs", type=int, default=8)
 args = parser.parse_args()
 subprocess.run(["python3", str(root / "tools/prepare-supplicant.py")], check=True)
 output = root / f"out/wpa-{args.target}"
+config_sha = hashlib.sha256((root / "userspace/supplicant.config").read_bytes()).hexdigest()
+prev_config_sha = ""
+if (output / "report.json").is_file():
+    prev_config_sha = json.loads((output / "report.json").read_text()).get("adapter_sha256", {}).get("userspace/supplicant.config", "")
+if prev_config_sha != config_sha:
+    shutil.rmtree(output, ignore_errors=True)
 output.mkdir(exist_ok=True)
 (output / "report.json").unlink(missing_ok=True)
 compiler = shutil.which("clang")

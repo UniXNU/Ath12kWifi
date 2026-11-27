@@ -10,6 +10,7 @@ static unsigned received;
 static enum wpa_event_type expected;
 static u8 message[512];
 static size_t length;
+static int mic_unicast, mic_has_source;
 void wpa_supplicant_event(void *context, enum wpa_event_type type, union wpa_event_data *event) {
   assert(context == message && type == expected); received++;
   if (type == EVENT_SIGNAL_CHANGE) assert(event->signal_change.data.signal == -55 && event->signal_change.above_threshold);
@@ -18,6 +19,11 @@ void wpa_supplicant_event(void *context, enum wpa_event_type type, union wpa_eve
   if (type == EVENT_RX_MGMT) assert(event->rx_mgmt.frame_len == 28 && event->rx_mgmt.ssi_signal == -42);
   if (type == EVENT_UNPROT_DEAUTH) assert(event->unprot_deauth.reason_code == 6);
   if (type == EVENT_DRIVER_GTK_REKEY) assert(event->driver_gtk_rekey.replay_ctr[7] == 9 && event->driver_gtk_rekey.bssid[0] == 2);
+  if (type == EVENT_MICHAEL_MIC_FAILURE) {
+    assert(event->michael_mic_failure.unicast == mic_unicast);
+    if (mic_has_source) assert(event->michael_mic_failure.src && event->michael_mic_failure.src[0] == 2 && event->michael_mic_failure.src[5] == 5);
+    else assert(!event->michael_mic_failure.src);
+  }
 }
 static void begin(unsigned command) { memset(message, 0, sizeof(message)); length = 20; message[16] = command; message[17] = 1; }
 static size_t attribute(unsigned type, const void *data, size_t size) {
@@ -58,5 +64,14 @@ int main(void) {
   attribute(NL80211_ATTR_MAC, bssid, sizeof(bssid)); nest = attribute(NL80211_ATTR_REKEY_DATA, NULL, 0);
   attribute(NL80211_REKEY_DATA_REPLAY_CTR, replay, sizeof(replay)); finish_nested(nest);
   expected = EVENT_DRIVER_GTK_REKEY; deliver(); assert(received == 6);
-  puts("wireless event decoder: CQM/beacon/RSSI, channel width, PMF management/unprotected deauth, rekey, malformed/duplicate notifications passed");
+  /* TKIP Michael MIC failures reach wpa_supplicant's countermeasures: pairwise, group, and a source that is no address. */
+  begin(NL80211_CMD_MICHAEL_MIC_FAILURE); attribute(NL80211_ATTR_MAC, bssid, sizeof(bssid));
+  scalar(NL80211_ATTR_KEY_TYPE, NL80211_KEYTYPE_PAIRWISE);
+  expected = EVENT_MICHAEL_MIC_FAILURE; mic_unicast = 1; mic_has_source = 1; deliver(); assert(received == 7);
+  begin(NL80211_CMD_MICHAEL_MIC_FAILURE); attribute(NL80211_ATTR_MAC, bssid, sizeof(bssid));
+  scalar(NL80211_ATTR_KEY_TYPE, NL80211_KEYTYPE_GROUP);
+  mic_unicast = 0; deliver(); assert(received == 8);
+  begin(NL80211_CMD_MICHAEL_MIC_FAILURE); attribute(NL80211_ATTR_MAC, bssid, 4);
+  mic_unicast = 1; mic_has_source = 0; deliver(); assert(received == 9);
+  puts("wireless event decoder: CQM/beacon/RSSI, channel width, PMF management/unprotected deauth, rekey, Michael MIC failure, malformed/duplicate notifications passed");
 }

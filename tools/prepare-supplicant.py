@@ -43,6 +43,7 @@ DRV_CFLAGS += -DCONFIG_DRIVER_SHENG
 DRV_OBJS += ../src/drivers/driver_sheng.o
 DRV_OBJS += ../src/drivers/nw_control_client.o
 DRV_OBJS += ../src/drivers/nw_control_wire.o
+DRV_OBJS += ../src/drivers/nw_crypto_ec.o
 DRV_OBJS += ../src/drivers/nw_supplicant_frontend.o
 DRV_OBJS += ../src/drivers/nw_wireless_event.o
 NEED_SME=y
@@ -56,12 +57,17 @@ replace("wpa_supplicant/wpa_supplicant.c", "\tssid->auth_failures++;",
         "#ifdef CONFIG_DRIVER_SHENG\n\tnw_supplicant_auth_failed(wpa_s, reason);\n#endif\n\n\tssid->auth_failures++;")
 replace("wpa_supplicant/wpa_supplicant.c", '#include "ctrl_iface.h"',
         '#include "ctrl_iface.h"\n#ifdef CONFIG_DRIVER_SHENG\n#include "nw_supplicant_frontend.h"\n#endif')
+replace("wpa_supplicant/notify.c", '#include "notify.h"',
+        '#include "notify.h"\n#ifdef CONFIG_DRIVER_SHENG\n#include "nw_supplicant_frontend.h"\n#endif')
+replace("wpa_supplicant/notify.c", "\twpas_dbus_signal_sae_password_mismatch(wpa_s);",
+        '#ifdef CONFIG_DRIVER_SHENG\n\tnw_supplicant_auth_failed(wpa_s, "WRONG_KEY");\n#endif\n\twpas_dbus_signal_sae_password_mismatch(wpa_s);')
 for name, data in staged.items():
     write_changed(out / name, data)
 for relative, source in {
     "src/drivers/driver_sheng.c": "userspace/driver_sheng.c",
     "src/drivers/nw_control_client.c": "userspace/nw_control_client.c",
     "src/drivers/nw_control_wire.c": "src/nw_control_wire.c",
+    "src/drivers/nw_crypto_ec.c": "userspace/nw_crypto_ec.c",
     "src/drivers/nw_supplicant_frontend.c": "userspace/nw_supplicant_frontend.c",
     "src/drivers/nw_wireless_event.c": "userspace/nw_wireless_event.c",
     "src/l2_packet/l2_packet_sheng.c": "userspace/l2_packet_sheng.c",

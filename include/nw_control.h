@@ -52,6 +52,7 @@ enum nw_control_attribute {
   NW_CONTROL_ATTR_PREVIOUS_BSSID, NW_CONTROL_ATTR_LOCAL_ONLY,
   NW_CONTROL_ATTR_ETHERTYPE, NW_CONTROL_ATTR_ACKED, NW_CONTROL_ATTR_REQUEST_IE,
   NW_CONTROL_ATTR_NO_ACK, NW_CONTROL_ATTR_WAIT, NW_CONTROL_ATTR_NO_CCK,
+  NW_CONTROL_ATTR_AUTH_DATA, NW_CONTROL_ATTR_WPA_VERSIONS,
   NW_CONTROL_ATTR_COUNT
 };
 /* Cipher and AKM values are IEEE suite selectors, not wpa_supplicant enums.
@@ -88,7 +89,9 @@ void nw_control_reply_state(struct nw_control_builder *builder, uint64_t generat
 #ifdef __cplusplus
 }
 static_assert(sizeof(nw_control_header) == NW_CONTROL_HEADER_SIZE, "control header layout");
+static_assert(NW_CONTROL_ATTR_COUNT <= 64, "attribute bitmask capacity");
 #else
 _Static_assert(sizeof(struct nw_control_header) == NW_CONTROL_HEADER_SIZE, "control header layout");
+_Static_assert(NW_CONTROL_ATTR_COUNT <= 64, "attribute bitmask capacity");
 #endif
 #endif
