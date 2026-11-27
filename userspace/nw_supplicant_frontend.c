@@ -196,7 +196,12 @@ void nw_supplicant_sae_confirm_check(void *context, int was_pending)
 {
 #ifdef CONFIG_SAE
   struct wpa_supplicant *supplicant = context;
-  if (was_pending && supplicant && supplicant->wpa_state == WPA_DISCONNECTED)
+  /* Report WRONG_KEY only when local SAE confirm verification itself failed
+   * (leaving sme.sae.state at SAE_CONFIRMED) rather than a post-confirm
+   * association failure after SAE_ACCEPTED. */
+  if (was_pending && supplicant &&
+      supplicant->wpa_state == WPA_DISCONNECTED &&
+      supplicant->sme.sae.state == SAE_CONFIRMED)
     nw_supplicant_auth_failed(supplicant, "WRONG_KEY");
 #else
   (void)context; (void)was_pending;

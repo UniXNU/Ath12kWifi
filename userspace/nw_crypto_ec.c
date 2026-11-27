@@ -821,13 +821,49 @@ out:
   return ret;
 }
 
-static int mp_test_bit(const mp_int *a, size_t bit)
+static uint32_t mp_test_bit_ct(const mp_int *a, size_t bit)
 {
   size_t digit_idx = bit / (size_t)DIGIT_BIT;
   size_t bit_idx = bit % (size_t)DIGIT_BIT;
-  if (digit_idx >= (size_t)a->used)
-    return 0;
-  return (int)((a->dp[digit_idx] >> bit_idx) & (mp_digit)1);
+  return (uint32_t)((a->dp[digit_idx] >> bit_idx) & (mp_digit)1);
+}
+
+static int mp_cond_swap_ct(mp_int *a, mp_int *b, uint32_t swap, int limbs)
+{
+  if (a->used > limbs)
+    limbs = a->used;
+  if (b->used > limbs)
+    limbs = b->used;
+  if (mp_grow(a, limbs) != MP_OKAY || mp_grow(b, limbs) != MP_OKAY)
+    return -1;
+  for (int i = a->used; i < limbs; i++)
+    a->dp[i] = 0;
+  for (int i = b->used; i < limbs; i++)
+    b->dp[i] = 0;
+  mp_digit dmask = (mp_digit)0 - (mp_digit)(swap & 1u);
+  for (int i = 0; i < limbs; i++) {
+    mp_digit diff = (a->dp[i] ^ b->dp[i]) & dmask;
+    a->dp[i] ^= diff;
+    b->dp[i] ^= diff;
+  }
+  unsigned int umask = 0u - (unsigned int)(swap & 1u);
+  unsigned int udiff = ((unsigned int)a->used ^ (unsigned int)b->used) & umask;
+  a->used = (int)((unsigned int)a->used ^ udiff);
+  b->used = (int)((unsigned int)b->used ^ udiff);
+  unsigned int sdiff = ((unsigned int)a->sign ^ (unsigned int)b->sign) & umask;
+  a->sign = (int)((unsigned int)a->sign ^ sdiff);
+  b->sign = (int)((unsigned int)b->sign ^ sdiff);
+  return 0;
+}
+
+static int jac_cond_swap_ct(struct nw_jac_point *a, struct nw_jac_point *b,
+                            uint32_t swap, int limbs)
+{
+  if (mp_cond_swap_ct(&a->x, &b->x, swap, limbs) ||
+      mp_cond_swap_ct(&a->y, &b->y, swap, limbs) ||
+      mp_cond_swap_ct(&a->z, &b->z, swap, limbs))
+    return -1;
+  return 0;
 }
 
 /* ---- crypto_ec_* ---- */
@@ -1082,8 +1118,17 @@ int crypto_ec_point_add(struct crypto_ec *e, const struct crypto_ec_point *a,
 
   struct nw_jac_point ja, jb, jc;
   int ret = -1;
-  if (jac_init(&ja) || jac_init(&jb) || jac_init(&jc))
+  if (jac_init(&ja))
     return -1;
+  if (jac_init(&jb)) {
+    jac_clear(&ja);
+    return -1;
+  }
+  if (jac_init(&jc)) {
+    jac_clear(&jb);
+    jac_clear(&ja);
+    return -1;
+  }
   if (jac_from_affine(a, &ja) == 0 &&
       jac_from_affine(b, &jb) == 0 &&
       jac_add(&ja, &jb, &jc, &e->prime.mp) == 0 &&
@@ -1112,6 +1157,7 @@ int crypto_ec_point_mul(struct crypto_ec *e, const struct crypto_ec_point *p,
   }
 
   struct nw_jac_point r0, r1;
+  mp_int k;
   int ret = -1;
   if (jac_init(&r0))
     return -1;
@@ -1119,28 +1165,44 @@ int crypto_ec_point_mul(struct crypto_ec *e, const struct crypto_ec_point *p,
     jac_clear(&r0);
     return -1;
   }
+  if (mp_init(&k) != MP_OKAY) {
+    jac_clear(&r1);
+    jac_clear(&r0);
+    return -1;
+  }
 
   jac_set_infinity(&r0);
-  if (jac_from_affine(p, &r1) != 0)
+  if (jac_from_affine(p, &r1) != 0 || mp_copy(bn_mp(b), &k) != MP_OKAY)
     goto out;
 
-  size_t scalar_bits = (size_t)mp_count_bits(bn_mp(b));
+  size_t scalar_bits = (size_t)mp_count_bits(&k);
   size_t nbits = scalar_bits > e->prime_bits ? scalar_bits : e->prime_bits;
+  int k_limbs = (int)((nbits + (size_t)DIGIT_BIT - 1u) / (size_t)DIGIT_BIT);
+  if (mp_grow(&k, k_limbs) != MP_OKAY)
+    goto out;
+  for (int i = k.used; i < k_limbs; i++)
+    k.dp[i] = 0;
+
+  int coord_limbs = e->prime.mp.used + 1;
+  uint32_t prev_bit = 0;
+  /* Constant-time conditional-swap Montgomery ladder removes secret-bit control-flow
+   * branching (note: underlying libtommath limb arithmetic remains variable-time). */
   for (size_t idx = nbits; idx > 0; idx--) {
-    if (mp_test_bit(&b->mp, idx - 1)) {
-      if (jac_add(&r0, &r1, &r0, &e->prime.mp) ||
-          jac_double(&r1, &r1, &e->prime.mp))
-        goto out;
-    } else {
-      if (jac_add(&r0, &r1, &r1, &e->prime.mp) ||
-          jac_double(&r0, &r0, &e->prime.mp))
-        goto out;
-    }
+    uint32_t bit = mp_test_bit_ct(&k, idx - 1);
+    if (jac_cond_swap_ct(&r0, &r1, bit ^ prev_bit, coord_limbs) != 0)
+      goto out;
+    prev_bit = bit;
+    if (jac_add(&r0, &r1, &r1, &e->prime.mp) ||
+        jac_double(&r0, &r0, &e->prime.mp))
+      goto out;
   }
+  if (jac_cond_swap_ct(&r0, &r1, prev_bit, coord_limbs) != 0)
+    goto out;
 
   ret = jac_to_affine(e, &r0, res);
 
 out:
+  mp_wipe_clear(&k);
   jac_clear(&r0);
   jac_clear(&r1);
   return ret;
