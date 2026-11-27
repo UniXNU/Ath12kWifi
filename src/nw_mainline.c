@@ -7,7 +7,7 @@
 #include "nw_cfg80211_control.h"
 #include "nw_events.h"
 
-#define UI_BSS_MAX 128
+#define UI_BSS_MAX 512
 static spinlock_t boundary_lock;
 static struct nw_wifi_status status;
 static struct nw_bss_info *bsses;
@@ -84,7 +84,43 @@ static void scan_snapshot(struct net_device *dev) {
     out->freq_mhz = entry->pub.channel->center_freq;
     out->signal_dbm = rdev->wiphy.signal_type == CFG80211_SIGNAL_TYPE_MBM ? entry->pub.signal / 100 : entry->pub.signal;
     out->caps = entry->pub.capability; out->beacon_int = entry->pub.beacon_interval;
-    out->ie_len = min_t(size_t, ies->len, sizeof(out->ie)); memcpy(out->ie, ies->data, out->ie_len);
+    size_t clean_ie = 0;
+    while (clean_ie + 2 <= ies->len) {
+      size_t elen = 2 + (size_t)ies->data[clean_ie + 1];
+      if (clean_ie + elen > ies->len || clean_ie + elen > sizeof(out->ie)) break;
+      clean_ie += elen;
+    }
+    if (clean_ie) memcpy(out->ie, ies->data, clean_ie);
+    const struct cfg80211_bss_ies *presp = rcu_dereference(entry->pub.proberesp_ies);
+    if (presp && presp != ies) {
+      size_t ppos = 0;
+      while (ppos + 2 <= presp->len) {
+        u8 ptag = presp->data[ppos];
+        size_t plen = (size_t)presp->data[ppos + 1];
+        if (ppos + 2 + plen > presp->len) break;
+        if (ptag == 0xdd && plen >= 4 && clean_ie + 2 + plen <= sizeof(out->ie)) {
+          const u8 *psig = presp->data + ppos + 2;
+          bool present = false;
+          size_t cpos = 0;
+          while (cpos + 2 <= clean_ie) {
+            u8 ctag = out->ie[cpos];
+            size_t clen = (size_t)out->ie[cpos + 1];
+            if (cpos + 2 + clen > clean_ie) break;
+            if (ctag == 0xdd && clen >= 4 && !memcmp(out->ie + cpos + 2, psig, 4)) {
+              present = true;
+              break;
+            }
+            cpos += 2 + clen;
+          }
+          if (!present) {
+            memcpy(out->ie + clean_ie, presp->data + ppos, 2 + plen);
+            clean_ie += 2 + plen;
+          }
+        }
+        ppos += 2 + plen;
+      }
+    }
+    out->ie_len = (uint16_t)clean_ie;
     const struct element *ssid = cfg80211_find_elem(WLAN_EID_SSID, ies->data, ies->len);
     if (ssid && ssid->datalen <= 32) { out->ssid_len = ssid->datalen; memcpy(out->ssid, ssid->data, ssid->datalen); }
   }
@@ -113,6 +149,19 @@ static int input(struct net_device *dev, struct sk_buff *packet) {
 static void input_flush(struct net_device *dev) { (void)dev; if (nw_events.rx_flush) nw_events.rx_flush(); }
 static void ready(struct net_device *dev) {
   dev->input = input; dev->input_flush = input_flush;
+  struct wiphy *wiphy = dev->ieee80211_ptr->wiphy;
+  for (unsigned band = 0; band < NUM_NL80211_BANDS; band++) {
+    struct ieee80211_supported_band *sband = wiphy->bands[band];
+    if (!sband) continue;
+    for (unsigned i = 0; i < sband->n_channels; i++) {
+      struct ieee80211_channel *ch = &sband->channels[i];
+      const u32 f = ch->center_freq;
+      if (!(ch->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_RADAR)) &&
+          ((f >= 2412 && f <= 2472) || (f >= 5180 && f <= 5240) || (f >= 5745 && f <= 5885))) {
+        ch->flags &= ~IEEE80211_CHAN_NO_IR;
+      }
+    }
+  }
   lx_shared_spin_lock(&boundary_lock);
   memcpy(status.mac, dev->dev_addr, ETH_ALEN); status.state = NW_STA_IDLE;
   status.channels = ieee80211_get_num_supported_channels(dev->ieee80211_ptr->wiphy);
@@ -164,7 +213,10 @@ static void event(unsigned operation, int result, const struct nw_control_view *
     if (result && status.state != NW_STA_UP) {
       join_waiting = false;
       status.state = NW_STA_UP; status.result = NW_RES_OK;
-      lx_shared_spin_unlock(&boundary_lock); if (nw_events.connect_done) nw_events.connect_done(NW_RES_OK); return;
+      lx_shared_spin_unlock(&boundary_lock);
+      if (dev) scan_snapshot(dev);
+      if (nw_events.connect_done) nw_events.connect_done(NW_RES_OK);
+      return;
     }
     if (!result && status.state == NW_STA_UP) {
       clear_connection(NW_STA_IDLE); epoch++;

@@ -149,7 +149,7 @@ int nw_supplicant_request(void *context, const struct nw_control_view *event)
      * report, so the list goes to the manual scan the command just queued (it starts from the event loop, after this returns).
      * A malformed list scans every band. */
     size_t bytes; const u8 *frequencies = nw_control_get(event, NW_CONTROL_ATTR_SCAN_FREQUENCIES, &bytes);
-    if (!result && frequencies && bytes && bytes % 4 == 0 && bytes / 4 <= 32 && supplicant->scan_req == MANUAL_SCAN_REQ) {
+    if (!result && frequencies && bytes && bytes % 4 == 0 && bytes / 4 <= 64 && supplicant->scan_req == MANUAL_SCAN_REQ) {
       int *list = os_calloc(bytes / 4 + 1, sizeof(int));
       if (list) {
         for (size_t i = 0; i < bytes / 4; i++) list[i] = (int)WPA_GET_LE32(frequencies + i * 4);
