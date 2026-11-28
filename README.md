@@ -120,3 +120,40 @@ On sheng with 24A446, device checks cover Wi-Fi toggling, SSID scanning,
 WPA2 association, DHCP, traffic and join-result delivery. Current device
 checks pending: cancellation/timeout completion, runtime signal display,
 Data firmware startup, throughput, jitter and heat.
+
+## ath11k
+
+`tools/sources-ath11k.txt` is the manifest for ath11k PCI chips (QCA6390,
+WCN6855, QCN9074). Its shared entries are those of `tools/sources.txt`; the
+ath12k entries become `ath11k:` entries from `out/ath11k-src`, and
+`src/nw_wifi_ath11k.c` and `src/nw_debug_ath11k.c` replace the ath12k glue.
+The `ath11k:` entries and `src/*_ath11k.c` also take
+`-I out/ath11k-src -include lx_ath11k.h -DCONFIG_ATH11K_DEBUG`.
+
+`tools/prepare.sh` runs `tools/prepare-ath11k.sh`. Its copies make
+`ath11k_pci_init` callable, evaluate the WMI send condition once per wait
+round, and make power-up write the PCI window register on first use.
+
+The worker refreshes link state once per second. The rate comes from the
+station's last transmit completion. ath11k reports no signal for data frames,
+so the RSSI is mac80211's average over frames from the access point that carry
+a signal: the management frames the firmware passes up. `nw_wifi_tx_reasons`
+reports the frames ath11k could not queue, per transmit ring.
+
+`tools/check-ath11k.sh` checks the ath11k sources. `tools/test-ath11k-glue.sh`
+runs both readings against the driver's peer table under ASan/UBSan.
+`tools/link-check-ath11k.sh` compiles the manifest with kernel flags:
+110 objects, 14 XNU imports (the 13 above and `strncmp`), zero duplicate
+definitions.
+
+Without an address in the chip's OTP the firmware reports a zero MAC and the
+interface does not open (`-EADDRNOTAVAIL`). A nonzero `nw_board.mac` is then
+the station address: ath11k's `device_get_mac_address` returns it.
+
+On the Xiaomi Mi 10 Ultra (QCA6390 hw2.0, iPadOS 17.7.11) the manifest brings
+the chip up through QMI, WMI and regulatory setup and registers 102 channels.
+A passive scan through a control session finds the 2.4 GHz and 5 GHz networks
+in about 2 s. The platform's `dma_alloc` must align each buffer physically to
+its size rounded up to a power of two, as Linux's `dma_alloc_coherent` does:
+the firmware stops ~90 ms after receiving misaligned host memory. Association,
+traffic and channels outside the custom regulatory domain are not checked yet.
