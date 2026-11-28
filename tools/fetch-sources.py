@@ -18,15 +18,26 @@ def git(directory, *arguments):
 
 def resolve(name, source, check_only):
     directory = ROOT / "deps" / name
+    paths = [path.strip("/") for path in source["paths"]]
     if not directory.exists():
         if check_only:
             raise SystemExit(f"missing source: {directory}")
-        subprocess.run(["git", "clone", "--depth", "1", "--branch", source["ref"],
-                        "--filter=blob:none", "--sparse", source["url"], str(directory)], check=True)
+        subprocess.run(["git", "init", str(directory)], check=True)
+        subprocess.run(["git", "-C", str(directory), "remote", "add", "origin", source["url"]], check=True)
+        subprocess.run(["git", "-C", str(directory), "sparse-checkout", "init"], check=True)
+        subprocess.run(["git", "-C", str(directory), "sparse-checkout", "set", "--skip-checks", *paths], check=True)
+        fetched = subprocess.run(
+            ["git", "-C", str(directory), "fetch", "--depth", "1", "--filter=blob:none", "origin", source["commit"]],
+            check=False,
+        )
+        if fetched.returncode != 0:
+            # Fall back to shallow branch fetch if the remote disallows direct SHA fetches.
+            subprocess.run(["git", "-C", str(directory), "fetch", "--depth", "1", "--filter=blob:none",
+                            "origin", source["ref"]], check=True)
+        subprocess.run(["git", "-C", str(directory), "checkout", "--detach", "FETCH_HEAD"], check=True)
     revision = git(directory, "rev-parse", "HEAD")
     if revision != source["commit"]:
         raise SystemExit(f"{name}: expected {source['commit']}, found {revision}; preserve the existing checkout and select the locked source")
-    paths = [path.strip("/") for path in source["paths"]]
     # Some hosts have case-folding changes in unrelated kernel headers; only
     # imported source directories participate in this component's identity.
     changed = git(directory, "diff", "--name-only", "HEAD", "--", *paths).splitlines()
